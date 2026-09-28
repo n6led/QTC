@@ -2,7 +2,8 @@
 
 ## Requirements
 
-One source tree builds native executables for Linux x86-64 with glibc and for macOS.
+One source tree supports native executables for Linux x86-64 and ARM64 (`aarch64`)
+with glibc, and for macOS. Cross-compilation is not required.
 
 Build requirements:
 
@@ -10,6 +11,7 @@ Build requirements:
 - GNU Make
 - SQLite 3 development headers and library
 - standard POSIX shell tools
+- Bash and Python 3 for the complete test suite (no third-party Python packages)
 - `tar` and `sha256sum` for release packaging, which is Linux-only
 
 Fedora:
@@ -21,7 +23,7 @@ sudo dnf install gcc make sqlite-devel
 Debian or Ubuntu:
 
 ```sh
-sudo apt install build-essential libsqlite3-dev
+sudo apt install build-essential libsqlite3-dev python3
 ```
 
 macOS:
@@ -43,6 +45,7 @@ The Makefile selects platform settings from `uname` and names the output for the
 
 ```text
 build/qtc-linux-x86_64
+build/qtc-linux-aarch64
 build/qtc-macos-arm64
 ```
 
@@ -55,6 +58,30 @@ linker rejects `-Wl,-z,...`:
 Linux    -D_POSIX_C_SOURCE=200809L   -Wl,-z,relro,-z,now
 macOS    -D_DARWIN_C_SOURCE          -Wl,-dead_strip
 ```
+
+### Native Linux ARM64
+
+Use a 64-bit Linux installation; `uname -m` should report `aarch64`.
+On Debian or Ubuntu ARM64, from the source directory:
+
+```sh
+sudo apt install build-essential libsqlite3-dev python3
+make clean
+make
+make test
+./build/qtc-linux-aarch64 --version
+sudo make install
+```
+
+The same Makefile and compiler flags are used on Linux x86-64 and ARM64.
+`make install` installs the host's executable as `/usr/local/bin/qtc`.
+An ARM-capable board running a 32-bit OS is outside this ARM64 target.
+
+User-reported validation covers Raspberry Pi 4, Debian GNU/Linux 13 (Trixie)
+ARM64, and a Seeed Wio Tracker L1 Pro with MeshCore USB Companion firmware:
+native build, the full existing test suite, live USB messages, detach/reattach,
+and background reception across SSH logout. This repository currently has no
+automated CI or release workflows; this hardware report is not CI verification.
 
 ## Tests
 
@@ -99,10 +126,14 @@ Release packaging runs on Linux only. It depends on GNU `sha256sum`, `tar --sort
 make package
 ```
 
-Artifacts are written to `dist/`:
+Packaging is native: run it on Linux x86-64 or ARM64 for that architecture's
+artifacts. The script uses `uname -m`, matching the Makefile. A `BIN` override
+must still point to an executable for the host architecture.
 
-- `qtc-linux-x86_64`
-- `qtc-terminal-1.0.0-linux-x86_64.tar.gz`
+Artifacts are written to `dist/` (where `<arch>` is `x86_64` or `aarch64`):
+
+- `qtc-linux-<arch>`
+- `qtc-terminal-1.0.0-linux-<arch>.tar.gz`
 - `qtc-terminal-1.0.0-source.tar.gz`
 - `CHANGELOG.md`
 - `BUILDING.md`
@@ -110,6 +141,8 @@ Artifacts are written to `dist/`:
 - `SHA256SUMS`
 
 `dist/` is generated output and should not be committed to Git.
+Each packaging run replaces `dist/`; retain artifacts separately when collecting
+releases from multiple hosts.
 
 ## Reproducible archive metadata
 
@@ -148,7 +181,9 @@ make test CC=clang
 Run QTC in demo mode with debug logging:
 
 ```sh
-./build/qtc-linux-x86_64 --debug --demo   # or ./build/qtc-macos-arm64
+./build/qtc-linux-x86_64 --debug --demo
+# ARM64 Linux: ./build/qtc-linux-aarch64 --debug --demo
+# macOS: ./build/qtc-macos-arm64 --debug --demo
 ```
 
 When using a real radio, debug output may contain contact names, message metadata, or device paths. Review logs before sharing them publicly.
