@@ -61,13 +61,29 @@ ls -l /dev/ttyACM0
 and add your user to that group instead.
 
 Connect the MeshCore device before starting QTC. QTC should run as your normal user; sudo is not normally required.
-Download `qtc-linux-x86_64` from the [latest GitHub release](https://github.com/initsixdev/QTC/releases/latest), then:
+On x86-64 Linux, download `qtc-linux-x86_64` from the [latest GitHub release](https://github.com/initsixdev/QTC/releases/latest), then:
 
 ```sh
 chmod +x qtc-linux-x86_64
 sudo install -m 0755 qtc-linux-x86_64 /usr/local/bin/qtc
 qtc
 ```
+
+On ARM64 Linux (`uname -m` reports `aarch64`), build natively from source.
+From the source directory on Debian or Ubuntu, including Debian 13 on Raspberry Pi 4:
+
+```sh
+sudo apt install build-essential libsqlite3-dev python3
+make
+make test
+sudo make install
+qtc
+```
+
+This produces `build/qtc-linux-aarch64`. See [BUILDING.md](BUILDING.md) for
+the reported ARM64 hardware validation and packaging instructions.
+
+### macOS
 
 There is no prebuilt macOS binary, so build from source. Nothing beyond Apple's toolchain is required, because the macOS SDK already supplies SQLite 3:
 
@@ -246,12 +262,14 @@ Global options such as `--profile` and `--device` may be placed before or after 
 
 ## Build from source
 
-One source tree builds native executables for both platforms. Required development packages:
+One source tree supports native Linux x86-64, Linux ARM64 (`aarch64`), and macOS
+builds. Required development packages:
 
 - C11 compiler
 - GNU Make
 - SQLite 3 development headers and library
 - POSIX development environment
+- Bash and Python 3 to run the complete test suite
 
 Fedora:
 
@@ -264,7 +282,7 @@ make test
 Debian or Ubuntu:
 
 ```sh
-sudo apt install build-essential libsqlite3-dev
+sudo apt install build-essential libsqlite3-dev python3
 make
 make test
 ```
@@ -281,6 +299,7 @@ The executable is named for the host platform:
 
 ```text
 build/qtc-linux-x86_64
+build/qtc-linux-aarch64
 build/qtc-macos-arm64
 ```
 

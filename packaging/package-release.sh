@@ -5,13 +5,15 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 VERSION=${VERSION:-1.0.0}
-BIN=${BIN:-build/qtc-linux-x86_64}
+ARCH=$(uname -m)
+EXECUTABLE_NAME="qtc-linux-${ARCH}"
+BIN=${BIN:-build/$EXECUTABLE_NAME}
 CC=${CC:-cc}
 CFLAGS=${CFLAGS:-unknown}
 LDFLAGS=${LDFLAGS:-unknown}
 DIST=${DIST:-dist}
 SOURCE_NAME="qtc-terminal-${VERSION}-source"
-BINARY_NAME="qtc-terminal-${VERSION}-linux-x86_64"
+BINARY_NAME="qtc-terminal-${VERSION}-linux-${ARCH}"
 
 [[ -x "$BIN" ]] || { echo "missing executable: $BIN" >&2; exit 1; }
 actual_version=$("$BIN" --version | awk '{print $2}')
@@ -57,8 +59,8 @@ MeshCore target protocol: Companion Protocol v3
 MANIFEST
 
 # Copy and test the exact standalone executable that will be released.
-install -m 0755 "$BIN" "$DIST/qtc-linux-x86_64"
-QTC_BIN="$ROOT/$DIST/qtc-linux-x86_64" ./tests/demo_core_test.sh
+install -m 0755 "$BIN" "$DIST/$EXECUTABLE_NAME"
+QTC_BIN="$ROOT/$DIST/$EXECUTABLE_NAME" ./tests/demo_core_test.sh
 
 # Package the exact source tree without generated objects, release outputs, or Git metadata.
 tar \
@@ -72,7 +74,7 @@ tar \
 cp "$manifest" "$DIST/.staging/$SOURCE_NAME/RELEASE-MANIFEST.txt"
 
 # Keep the binary package focused on installation, usage, build information, licensing, and privacy.
-install -m 0755 "$DIST/qtc-linux-x86_64" "$DIST/.staging/$BINARY_NAME/qtc-linux-x86_64"
+install -m 0755 "$DIST/$EXECUTABLE_NAME" "$DIST/.staging/$BINARY_NAME/$EXECUTABLE_NAME"
 for file in README.md CHANGELOG.md BUILDING.md LICENSE NOTICE.md PRIVACY.md; do
     cp "$file" "$DIST/.staging/$BINARY_NAME/$file"
 done
@@ -90,7 +92,7 @@ cp BUILDING.md "$DIST/BUILDING.md"
 (
     cd "$DIST"
     sha256sum \
-        qtc-linux-x86_64 \
+        "$EXECUTABLE_NAME" \
         "${BINARY_NAME}.tar.gz" \
         "${SOURCE_NAME}.tar.gz" \
         CHANGELOG.md \
