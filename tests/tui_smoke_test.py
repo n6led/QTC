@@ -125,7 +125,7 @@ def main() -> None:
     output = bytearray(read_available(master, 2.0))
 
     screen = render_terminal(bytes(output))
-    assert screen[0].startswith(" QTC TERMINAL 1.0.0"), screen[0]
+    assert screen[0].startswith(" QTC TERMINAL 1.1.0"), screen[0]
     assert screen[2].startswith("  CHANNELS"), screen[2]
     assert "| Select a conversation" in screen[2], screen[2]
     assert "F4 Settings" in screen[ROWS - 2], screen[ROWS - 2]

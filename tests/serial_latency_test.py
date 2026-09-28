@@ -392,7 +392,7 @@ def main() -> None:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.connect(str(socket_path))
         ipc_send(client, QTC_IPC_HELLO,
-                 struct.pack("<I32s16s", 2, b"latency-test", b"1.0.0"))
+                 struct.pack("<I32s16s", 2, b"latency-test", b"1.1.0"))
         while True:
             frame_type, _ = ipc_recv(client, 5.0)
             if frame_type == QTC_IPC_STATE_END:
