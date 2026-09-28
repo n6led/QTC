@@ -2,6 +2,8 @@
 
 **An old-school-cool terminal client for MeshCore messaging on Linux and macOS.**
 
+> This repository is a fork of [initsixdev/QTC](https://github.com/initsixdev/QTC), focused on Linux ARM64, headless Raspberry Pi deployments, and MeshCore USB Companion operation.
+
 <p align="center">
   <img src="docs/qtc.png" alt="QTC Terminal" width="900">
 </p>
