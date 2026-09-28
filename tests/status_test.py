@@ -94,10 +94,15 @@ def main():
                     kind, request = receive(conn)
                     assert kind == 33 and request[5:] == b"\x01"
                     conn.sendall(b"".join(legacy_frames))
-                output, errors = client.communicate(timeout=5)
-                assert client.returncode == 0, errors
-                assert output.startswith("QTC core: running\nMode: radio\nRadio: disconnected\n")
-                assert "PID:" not in output and "Database:" not in output
+                    # A real core keeps the connection open until the client
+                    # finishes. Closing here can raise POLLHUP before the IPC
+                    # reader consumes the buffered reply, racing status parsing.
+                    output, errors = client.communicate(timeout=5)
+                diagnostic = (f"legacy status: returncode={client.returncode}, "
+                              f"stdout={output!r}, stderr={errors!r}")
+                assert client.returncode == 0, diagnostic
+                assert output.startswith("QTC core: running\nMode: radio\nRadio: disconnected\n"), diagnostic
+                assert "PID:" not in output and "Database:" not in output, diagnostic
             finally:
                 if client.poll() is None:
                     client.kill()
