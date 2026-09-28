@@ -1,5 +1,5 @@
 CC ?= cc
-VERSION := 1.1.0
+VERSION := 1.1.1
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.1
+
+- Fixed TUI divider misalignment on rows containing wide Unicode / emoji characters.
+- Re-anchor the terminal cursor after width-sensitive multibyte framebuffer cells
+  while preserving efficient sequential ASCII rendering.
+
 ## v1.1.0
 
 - Add documented native Linux ARM64 / aarch64 build support and architecture-specific
