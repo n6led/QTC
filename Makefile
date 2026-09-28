@@ -50,6 +50,7 @@ unit-test: $(TEST_BIN)
 
 integration-test: $(BIN)
 	QTC_BIN=$(abspath $(BIN)) ./tests/demo_core_test.sh
+	QTC_BIN=$(abspath $(BIN)) python3 ./tests/status_test.py
 	QTC_BIN=$(abspath $(BIN)) python3 ./tests/tui_smoke_test.py
 	QTC_BIN=$(abspath $(BIN)) QTC_TIMING_SCALE=$(QTC_TIMING_SCALE) python3 ./tests/serial_latency_test.py
 

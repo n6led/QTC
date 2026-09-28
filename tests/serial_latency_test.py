@@ -429,6 +429,14 @@ def main() -> None:
                 f"local delivered confirmation took {confirmation_latency * 1000:.1f} ms"
             )
 
+        # Query a ready radio through IPC while the simulator owns the serial end.
+        status = subprocess.run([binary, "status", "--profile", profile], env=env,
+                                capture_output=True, text=True, timeout=5, check=True)
+        fields = dict(line.split(": ", 1) for line in status.stdout.splitlines())
+        assert fields["QTC core"] == "running"
+        assert fields["Radio"] == "connected" and fields["Session"] == "ready"
+        assert fields["Device"] == slave_path and fields["PID"] == str(core.pid)
+
         incoming_text = "instant incoming message"
         incoming_started = simulator.queue_incoming(incoming_text)
         incoming_at = wait_for_message(client, incoming_text, QTC_MSG_INCOMING,

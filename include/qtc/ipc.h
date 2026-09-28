@@ -41,10 +41,26 @@ typedef enum {
     QTC_IPC_DEVICE_COPY_CARD = 43,
     QTC_IPC_DEVICE_SET_PRESET = 44,
     QTC_IPC_CLIPBOARD_TEXT = 45,
+    QTC_IPC_STATUS_DETAILS = 46,
+    QTC_IPC_STATUS_DATABASE = 47,
     QTC_IPC_ERROR = 255
 } qtc_ipc_type;
 
 #define QTC_IPC_PROTOCOL_VERSION 2U
+
+/* Optional one-byte PING request; ordinary PING and STATUS remain unchanged. */
+#define QTC_IPC_STATUS_DETAILS_VERSION 1U
+typedef struct {
+    int64_t pid;
+    int64_t uptime_seconds;
+    char profile[64];
+    char session[32];
+    char device[QTC_MAX_PATH];
+} qtc_ipc_status_details;
+_Static_assert(sizeof(qtc_ipc_status_details) <= QTC_MAX_FRAME, "status details exceed frame limit");
+
+/* STATUS_DATABASE carries a NUL-terminated path in a separate frame so two
+ * maximum-length paths never exceed QTC_MAX_FRAME. */
 
 typedef struct {
     uint8_t type;
