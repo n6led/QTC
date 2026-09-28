@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-VERSION=${VERSION:-1.1.0}
+VERSION=${VERSION:-1.1.1}
 ARCH=$(uname -m)
 EXECUTABLE_NAME="qtc-linux-${ARCH}"
 BIN=${BIN:-build/$EXECUTABLE_NAME}
