@@ -34,6 +34,14 @@ Local frames use:
 
 Initial state is delivered as a snapshot. Live sends, receives, acknowledgements, unread counts, settings, and connection changes use incremental updates so normal terminal activity does not block the radio path.
 
+Status uses PING without a snapshot or database query. An empty PING retains the
+CORE_INFO / STATUS reply. A one-byte payload of 1 requests optional version-1
+status details: CORE_INFO, STATUS_DETAILS (PID, monotonic uptime, profile, session,
+device), STATUS_DATABASE (NUL-terminated path), then the unchanged STATUS frame.
+The paths use separate frames to stay below the existing 8192-byte frame limit.
+Older cores ignore the PING payload and return basic status; new clients accept
+that reply. The base IPC version and TUI payloads are unchanged.
+
 The terminal reports its active conversation to the core so desktop notifications can be suppressed for an already-open chat while in-terminal message feedback remains available.
 
 ## Database

@@ -209,6 +209,22 @@ Check the running core with:
 qtc status
 ```
 
+Status queries the core through local IPC without opening the radio or querying
+the database. It reports PID, uptime in whole seconds, profile, mode, radio
+connection, device, MeshCore session phase, and database path. Node name and
+firmware are shown when known (they may be last-known values after a disconnect).
+`Device` is the active serial path while open, otherwise the configured path;
+it is `unknown` when none is known and `not applicable` in demo mode.
+`Session: ready` describes handshake completion, while `Status` is the latest
+core status message. Neither guarantees radio reachability at this instant.
+
+Uptime uses a monotonic clock since core initialization and resets on restart.
+The first line remains `QTC core: running` or `QTC core: stopped`; stopped cores
+emit no runtime fields and return exit status 1. Incompatible cores report running
+with an error on stderr and a nonzero exit status. Older compatible cores return
+the original basic status without the new runtime fields. RX/TX ages and database
+totals are not collected by this command.
+
 ### Start at boot with a systemd user service (Linux)
 
 QTC's detached core survives TUI and SSH disconnects, but does not start itself

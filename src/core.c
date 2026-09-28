@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define RADIO_QUEUE 128
@@ -87,6 +88,7 @@ typedef struct {
     qtc_state state;
     bool demo;
     bool running;
+    struct timespec started;
     int server_fd;
     int lock_fd;
     core_client clients[QTC_MAX_CLIENTS];
@@ -154,6 +156,29 @@ static int reload_state(core_ctx *c, uint64_t contact_rev, uint64_t channel_rev,
     c->state = *fresh;
     free(fresh);
     return 0;
+}
+
+static int send_status_details(core_ctx *c, int fd) {
+    qtc_ipc_status_details d = {0};
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    d.pid = (int64_t)getpid();
+    d.uptime_seconds = now.tv_sec - c->started.tv_sec;
+    if (now.tv_nsec < c->started.tv_nsec) d.uptime_seconds--;
+    qtc_strlcpy(d.profile, c->paths.profile, sizeof(d.profile));
+    const char *session = "disconnected";
+    if (c->demo) session = "demo";
+    else if (c->session_phase == RADIO_SESSION_READY) session = "ready";
+    else if (c->session_phase == RADIO_SESSION_WAIT_APP_START) session = "waiting for app start";
+    else if (c->session_phase == RADIO_SESSION_WAIT_DEVICE_INFO) session = "waiting for device info";
+    qtc_strlcpy(d.session, session, sizeof(d.session));
+    const char *device = c->serial.fd >= 0 ? c->serial.device :
+        (c->requested_device[0] ? c->requested_device : c->state.settings.serial_device);
+    qtc_strlcpy(d.device, c->demo ? "not applicable" :
+                (device[0] ? device : "unknown"), sizeof(d.device));
+    if (qtc_ipc_send(fd, QTC_IPC_STATUS_DETAILS, &d, sizeof(d)) != 0) return -1;
+    return qtc_ipc_send(fd, QTC_IPC_STATUS_DATABASE, c->paths.db_path,
+                        (uint32_t)strlen(c->paths.db_path) + 1);
 }
 
 static int send_status_frame(core_ctx *c, int fd) {
@@ -1396,6 +1421,8 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
             break;
         case QTC_IPC_PING:
             (void)send_core_info(c->clients[c->current_client].fd);
+            if (f->length == 1 && f->payload[0] == QTC_IPC_STATUS_DETAILS_VERSION)
+                (void)send_status_details(c, c->clients[c->current_client].fd);
             (void)send_status_frame(c, c->clients[c->current_client].fd);
             break;
         case QTC_IPC_SETTINGS:
@@ -1782,6 +1809,7 @@ int qtc_core_run(const qtc_paths *paths, const char *device, bool demo, bool for
     (void)foreground;
     static core_ctx c;
     memset(&c, 0, sizeof(c)); c.paths = *paths; c.demo = demo; c.running = true;
+    if (clock_gettime(CLOCK_MONOTONIC, &c.started) != 0) return 1;
     c.server_fd = c.lock_fd = -1; c.serial.fd = -1; c.current_client = -1;
     c.clipboard_client = -1;
     qtc_strlcpy(c.requested_device, device, sizeof(c.requested_device));
@@ -1910,10 +1938,24 @@ fail:
     return 1;
 }
 
+/* Keep device-supplied names and configured paths safe for terminals and logs. */
+static void print_status_value(const char *label, const char *value, size_t size) {
+    printf("%s: ", label);
+    for (size_t i = 0; i < size && value[i]; i++) {
+        unsigned char ch = (unsigned char)value[i];
+        putchar(ch < 32 || ch == 127 ? '?' : ch);
+    }
+    putchar('\n');
+}
+
 int qtc_core_status(const qtc_paths *paths) {
     int fd = qtc_ipc_client_connect(paths->socket_path, 500);
     if (fd < 0) { puts("QTC core: stopped"); return 1; }
-    (void)qtc_ipc_send(fd, QTC_IPC_PING, NULL, 0); qtc_ipc_frame f;
+    uint8_t request = QTC_IPC_STATUS_DETAILS_VERSION;
+    (void)qtc_ipc_send(fd, QTC_IPC_PING, &request, sizeof(request)); qtc_ipc_frame f;
+    qtc_ipc_status_details details = {0};
+    bool have_details = false;
+    char database[QTC_MAX_PATH] = {0};
     int rc = 1;
     for (int i = 0; i < 16; i++) {
         if (qtc_ipc_recv_blocking(fd, &f, 1000) != 0) break;
@@ -1921,15 +1963,37 @@ int qtc_core_status(const qtc_paths *paths) {
             const qtc_ipc_core_info *info = (const void *)f.payload;
             if (info->protocol_version != QTC_IPC_PROTOCOL_VERSION ||
                 strcmp(info->app_version, QTC_VERSION) != 0) {
-                printf("QTC core: incompatible (%s)\n", info->app_version);
+                puts("QTC core: running");
+                fputs("QTC core/client version mismatch; restart the background core\n", stderr);
                 break;
             }
             continue;
         }
+        if (f.type == QTC_IPC_STATUS_DETAILS && f.length == sizeof(details)) {
+            memcpy(&details, f.payload, sizeof(details)); have_details = true;
+        }
+        if (f.type == QTC_IPC_STATUS_DATABASE && f.length > 0 && f.length <= sizeof(database) &&
+            f.payload[f.length - 1] == 0) memcpy(database, f.payload, f.length);
         if (f.type == QTC_IPC_STATUS && f.length == sizeof(qtc_ipc_status_payload)) {
-            const qtc_ipc_status_payload *s = (const void *)f.payload;
-            printf("QTC core: running\nMode: %s\nRadio: %s\nStatus: %s\n",
-                   s->demo_mode ? "demo" : "radio", s->radio_connected ? "connected" : "disconnected", s->message); rc = 0; break;
+            qtc_ipc_status_payload status;
+            memcpy(&status, f.payload, sizeof(status));
+            const qtc_ipc_status_payload *s = &status;
+            puts("QTC core: running");
+            if (have_details) {
+                printf("PID: %lld\nUptime: %llds\n", (long long)details.pid, (long long)details.uptime_seconds);
+                print_status_value("Profile", details.profile, sizeof(details.profile));
+            }
+            printf("Mode: %s\nRadio: %s\n", s->demo_mode ? "demo" : "radio",
+                   s->radio_connected ? "connected" : "disconnected");
+            if (have_details) {
+                print_status_value("Device", details.device, sizeof(details.device));
+                print_status_value("Session", details.session, sizeof(details.session));
+            }
+            print_status_value("Status", s->message, sizeof(s->message));
+            if (s->radio_name[0]) print_status_value("Node", s->radio_name, sizeof(s->radio_name));
+            if (s->radio_version[0]) print_status_value("Firmware", s->radio_version, sizeof(s->radio_version));
+            if (database[0]) print_status_value("Database", database, sizeof(database));
+            rc = 0; break;
         }
     }
     close(fd); return rc;
