@@ -27,7 +27,7 @@ def cell_width(ch: str) -> int:
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
 
-def render_terminal(data: bytes) -> list[str]:
+def render_terminal(data: bytes, width_fn=cell_width) -> list[str]:
     text = data.decode("utf-8", "replace")
     screen = [[" "] * COLS for _ in range(ROWS)]
     row = 0
@@ -60,7 +60,7 @@ def render_terminal(data: bytes) -> list[str]:
             continue
         if ord(ch) < 32:
             continue
-        width = cell_width(ch)
+        width = width_fn(ch)
         if width == 0:
             continue
         if 0 <= row < ROWS and 0 <= col < COLS:
@@ -160,6 +160,38 @@ def main() -> None:
     output.extend(read_available(master, 0.4))
     ana_selected = render_terminal(bytes(output))
     assert any(line.startswith(" > Ana") for line in ana_selected), "Ana was not selected"
+
+    # Exercise real roster rendering with a terminal that advances only one
+    # column for emoji libc counts as wide. Re-anchors must protect the divider.
+    emoji = "📡🥃🌱🍎"
+    def narrow_emoji(ch):
+        return 1 if ch in emoji else cell_width(ch)
+
+    divider = ana_selected[2].index("|")
+    previous_alias = ""
+    for alias in ("Plain ASCII", "N6LED-R📡", "N6LED - OBSVR🥃",
+                  "🌱MeshGarden🍎 BOT", "Cafe\u0301📡"):
+        os.write(master, b"\x1b[12~")  # F2 alias
+        os.write(master, b"\x7f" * len(previous_alias.encode("utf-8")) +
+                 alias.encode("utf-8") + b"\r")
+        frame = read_available(master, 0.5)
+        output.extend(frame)
+        normal = render_terminal(frame)
+        narrow = render_terminal(frame, narrow_emoji)
+        roster_row = next(i for i, line in enumerate(normal) if line.startswith(" > "))
+        assert alias.encode("utf-8") in re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", frame), alias
+        assert normal[roster_row][divider] == "|", normal[roster_row]
+        assert narrow[roster_row][divider] == "|", narrow[roster_row]
+        # Removing only non-row-start anchors recreates the width-disagreement
+        # failure, proving this model is sensitive to the original defect.
+        if any(ch in alias for ch in emoji):
+            unanchored = re.sub(rb"\x1b\[[0-9]+;(?!1H)[0-9]+H", b"", frame)
+            shifted = render_terminal(unanchored, narrow_emoji)
+            assert shifted[roster_row][divider] != "|", shifted[roster_row]
+        previous_alias = alias
+    # Restore the original alias before the existing interaction checks.
+    os.write(master, b"\x1b[12~" + b"\x7f" * len(previous_alias.encode("utf-8")) + b"\r")
+    output.extend(read_available(master, 0.5))
 
     # Restore the old interactive conveniences through the actual TUI: favorite, alias, and group.
     os.write(master, b"f")

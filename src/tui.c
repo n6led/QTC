@@ -1847,7 +1847,8 @@ static void render(tui_ctx *t) {
         if (t->mode != MODE_NORMAL && t->mode != MODE_SEARCH && t->mode != MODE_COMPOSE) render_modal(t, &s);
     }
 
-    size_t cap = (size_t)t->width * (size_t)t->height * 24U + (size_t)t->height * 40U + 512U;
+    /* Allow for cell bytes, style changes, and Unicode cursor re-anchors. */
+    size_t cap = (size_t)t->width * (size_t)t->height * 64U + (size_t)t->height * 40U + 512U;
     char *out = malloc(cap);
     if (out == NULL) { screen_free(&s); return; }
     size_t used = 0;
@@ -1866,6 +1867,11 @@ static void render(tui_ctx *t) {
                 current_style = cell->style;
             }
             out_append(out, cap, &used, cell->bytes, cell->len);
+            /* The terminal may disagree with libc about Unicode width. Emit
+             * the complete cell (including combining marks), then restore the
+             * next framebuffer position. Plain ASCII needs no extra movement. */
+            if ((cell->len > 1 || cell->width > 1) && c + cell->width < t->width - 1)
+                out_fmt(out, cap, &used, "\x1b[%d;%dH", r + 1, c + cell->width + 1);
         }
     }
     out_append(out, cap, &used, "\x1b[0m", strlen("\x1b[0m"));
