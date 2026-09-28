@@ -79,6 +79,8 @@ for file in README.md CHANGELOG.md BUILDING.md LICENSE NOTICE.md PRIVACY.md; do
     cp "$file" "$DIST/.staging/$BINARY_NAME/$file"
 done
 cp "$manifest" "$DIST/.staging/$BINARY_NAME/RELEASE-MANIFEST.txt"
+mkdir -p "$DIST/.staging/$BINARY_NAME/packaging/systemd"
+install -m 0644 packaging/systemd/qtc.service.example "$DIST/.staging/$BINARY_NAME/packaging/systemd/qtc.service.example"
 
 # Normalize archive ownership, ordering, and timestamps.
 tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \

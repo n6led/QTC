@@ -1,0 +1,14 @@
+# Copy to ~/.config/systemd/user/qtc.service and edit before enabling.
+# Replace REPLACE_WITH_YOUR_DEVICE with the name from /dev/serial/by-id/.
+# Adjust /usr/local/bin/qtc if installed elsewhere. See README.md.
+[Unit]
+Description=QTC MeshCore Terminal Core
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/qtc core --device /dev/serial/by-id/REPLACE_WITH_YOUR_DEVICE --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -207,6 +207,117 @@ Check the running core with:
 qtc status
 ```
 
+### Start at boot with a systemd user service (Linux)
+
+QTC's detached core survives TUI and SSH disconnects, but does not start itself
+after a full reboot. On headless Linux systems, use the supplied
+[`qtc.service.example`](packaging/systemd/qtc.service.example) to start the core
+with the systemd user manager. The template is included in source and Linux binary
+release archives; installation is optional and manual. It runs QTC as your normal
+user with `core --foreground`, using the default profile.
+
+First install QTC at `/usr/local/bin/qtc` (see [BUILDING.md](BUILDING.md)) and find
+your radio's stable path:
+
+```sh
+qtc --list-devices
+ls -l /dev/serial/by-id/
+groups
+```
+
+Prefer `/dev/serial/by-id/...` over `/dev/ttyACM0`, whose number can change.
+On Debian-family systems, if your user lacks serial access:
+
+```sh
+sudo usermod -aG dialout "$USER"
+```
+
+Log out completely and log back in, then check `groups` again. A lingering user
+manager may retain its old group membership; reboot after changing groups if
+the service still reports permission denied. On other distributions, use the
+group that owns the serial device. Do not run QTC or `systemctl --user` with sudo.
+
+From the source tree or extracted binary release directory:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/qtc.service.example ~/.config/systemd/user/qtc.service
+${EDITOR:-nano} ~/.config/systemd/user/qtc.service
+```
+
+Replace `REPLACE_WITH_YOUR_DEVICE` in `ExecStart` with your radio's actual by-id
+name. Adjust the executable path if QTC is installed elsewhere. For example, the
+reported Tracker L1 Pro deployment uses this device path (your identifier will
+differ):
+
+```text
+/dev/serial/by-id/usb-Seeed_Studio_Seeed_Wio_Tracker_L1_4BE7EE8B1A4E4859-if00
+```
+
+The service uses the normal user's default data locations. If you use a custom
+`--profile` or XDG data/config paths, configure the same values in the service
+and your interactive commands; a user service does not read your shell startup
+files. Stop any existing detached core for that profile with `qtc shutdown`
+before enabling the service, and wait for `qtc status` to report it stopped.
+Do not launch the TUI again until the service is running.
+
+Enable lingering so the user manager starts at boot without an interactive login
+and remains available after logout. Run this as the account that will run QTC
+(`$USER` supplies the username; equivalently use `sudo loginctl enable-linger <username>`):
+
+```sh
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now qtc.service
+systemctl --user status qtc.service
+qtc status
+```
+
+Check both statuses: an active service means the core process is running, while
+`qtc status` should report `Mode: radio`, `Radio: connected`, and
+`Status: MeshCore session ready` once the radio is ready. Inspect logs with:
+
+```sh
+journalctl --user -u qtc.service -b
+```
+
+`Restart=on-failure` and `RestartSec=5` retry process failures after five seconds.
+When USB is temporarily absent, the current core normally stays alive and retries
+the radio connection itself; systemd does not restart a still-running process.
+Neither mechanism fixes an incorrect device path or missing serial permissions.
+If systemd reports a start-limit failure, fix the cause, run
+`systemctl --user reset-failed qtc.service`, then restart it.
+
+To manage the service:
+
+```sh
+systemctl --user restart qtc.service
+systemctl --user stop qtc.service
+```
+
+After editing the unit, run `systemctl --user daemon-reload` before restarting.
+Running `qtc` attaches the TUI to the service's core; F8 detaches it and reception
+continues after SSH logout. `qtc shutdown` or Ctrl+Q twice exits cleanly and is
+not restarted by `Restart=on-failure`; use `systemctl --user restart qtc.service`
+to resume. Starting `qtc` while the service is stopped can create a detached core
+again, so start the service first.
+
+To disable boot startup and remove the service:
+
+```sh
+systemctl --user disable --now qtc.service
+rm ~/.config/systemd/user/qtc.service
+systemctl --user daemon-reload
+```
+
+This preserves QTC's database and settings. If you enabled lingering only for QTC
+and no other user services need it, optionally run `sudo loginctl disable-linger "$USER"`.
+
+The manually configured user-service model has been reported working on a
+Raspberry Pi 4 running Debian 13 ARM64 with a Seeed Wio Tracker L1 Pro, including
+reboot startup and reception without an SSH session. That report does not replace
+boot-time validation of this repository template on your Linux deployment.
+
 ## Notifications and sound
 
 QTC works without desktop integration. It looks for helper programs at runtime and uses the first one present, so the same build behaves correctly on any desktop. Notifications try `notify-send`, then `terminal-notifier`, then `osascript`. Sound tries `canberra-gtk-play`, then `pw-play`, then `afplay`. Clipboard export tries `wl-copy`, `xclip`, `xsel`, then `pbcopy`.
