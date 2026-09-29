@@ -36,6 +36,37 @@ static void draw(tui_ctx *t) {
     screen_free(&s);
 }
 
+static void test_mention_cancel(void) {
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    int sockets[2]; ASSERT_EQ_INT(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+    t->fd = sockets[0]; t->open_kind = QTC_CONV_CONTACT; strcpy(t->open_key, "remote");
+    normal_key(t, 'm'); type_text(t, "@"); ASSERT_TRUE(t->mention_active);
+    normal_key(t, '\t'); ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
+    ASSERT_TRUE(t->mention_active); ASSERT_STREQ(t->draft, "");
+    normal_key(t, 27); ASSERT_STREQ(t->input, ""); ASSERT_EQ_INT(t->input_len, 0);
+    normal_key(t, '\r'); ASSERT_EQ_INT(t->mode, MODE_NORMAL);
+    char unexpected;
+    ASSERT_EQ_INT(recv(sockets[1], &unexpected, 1, MSG_DONTWAIT), -1);
+    ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+    normal_key(t, 'm'); type_text(t, "@"); normal_key(t, 27); normal_key(t, 27);
+    normal_key(t, 'm'); ASSERT_STREQ(t->input, ""); ASSERT_STREQ(t->draft, "");
+    type_text(t, "Hello @"); normal_key(t, 27); ASSERT_STREQ(t->input, "Hello ");
+    normal_key(t, 27); normal_key(t, 'm'); ASSERT_STREQ(t->input, "Hello ");
+    type_text(t, "@query"); normal_key(t, 27); ASSERT_STREQ(t->input, "Hello @query");
+    t->input[0] = 0; t->input_len = 0;
+    type_text(t, "mail@example.com"); ASSERT_TRUE(!t->mention_active);
+    normal_key(t, 27); normal_key(t, 'm'); ASSERT_STREQ(t->input, "mail@example.com");
+    t->input[0] = 0; t->input_len = 0;
+    type_text(t, "@"); save_composer(t); ASSERT_STREQ(t->draft, "");
+    type_text(t, "@"); special_key(t, "\x1b[C"); ASSERT_STREQ(t->input, "");
+    /* Picker cancellation must not interfere with quoted-reply rollback. */
+    strcpy(t->reply_backup, "prior draft"); t->replying = true;
+    type_text(t, "@[A] > quote | @"); ASSERT_TRUE(t->mention_active);
+    normal_key(t, 27); ASSERT_STREQ(t->input, "@[A] > quote | ");
+    normal_key(t, 27); ASSERT_STREQ(t->draft, "prior draft");
+    close(sockets[0]); close(sockets[1]); free(t);
+}
+
 static void test_quoted_selection(void) {
     tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
     t->fd = -1; t->width = 100; t->height = 28;
@@ -88,6 +119,7 @@ static void test_quoted_selection(void) {
 
 int main(void) {
     ASSERT_TRUE(setlocale(LC_CTYPE, "") != NULL);
+    test_mention_cancel();
     test_quoted_selection();
     ASSERT_EQ_INT(wcwidth(L'\U0001f4e1'), 2);
     char name[QTC_MAX_NAME], prefix[QTC_MAX_NAME + 4];
@@ -176,11 +208,11 @@ int main(void) {
     ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
     type_text(t, "@"); normal_key(t, 27);
     ASSERT_TRUE(!t->mention_active); ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ");
     type_text(t, "ordinary");
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @ordinary");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ordinary");
     escape_mode(t); start_input(t, MODE_COMPOSE);
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @ordinary");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ordinary");
     t->input[0] = 0; t->input_len = 0; t->draft[0] = 0;
     type_text(t, "@🌱"); normal_key(t, '\r');
     ASSERT_STREQ(t->input, "@[🌱MeshGarden🍎 BOT] ");

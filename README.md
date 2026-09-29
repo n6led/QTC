@@ -221,8 +221,11 @@ text. These channel names are unverified display information. See
 
 Typing `@` at the beginning of the composer or after a space opens suggestions.
 Continue typing to filter using the existing roster search rules, use Up/Down to
-choose, and Enter to insert `@[Exact Display Name] ` without sending. Escape closes
-suggestions and keeps what you typed. Typing `[` closes suggestions so you can
+choose, and Enter to insert `@[Exact Display Name] ` without sending. Tab does
+nothing while suggestions are open. Escape closes suggestions and removes a bare
+active `@` trigger, preserving preceding text and any typed search query. Leaving
+the composer also removes a bare active trigger before saving the draft.
+Typing `[` closes suggestions so you can
 enter a mention manually. Ordinary text such as `mail@example.com` stays ordinary
 text. Candidates are deduplicated: recent incoming senders in this conversation,
 the direct contact, then known people, with a maximum of 64 matching names. No

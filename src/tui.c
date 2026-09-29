@@ -511,8 +511,20 @@ static void leave_conversation(tui_ctx *t) {
     if (t->open_key[0]) report_active_conversation(t, false);
 }
 
+static void cancel_mention(tui_ctx *t) {
+    /* Only a bare active trigger is transient; typed queries are user text. */
+    if (t->mention_active && t->input_len == t->mention_start + 1 &&
+        t->input[t->mention_start] == '@') {
+        t->input_len = t->mention_start;
+        t->input[t->input_len] = 0;
+    }
+    t->mention_active = false;
+    t->dirty = true;
+}
+
 static void save_composer(tui_ctx *t) {
     if (t->mode == MODE_COMPOSE) {
+        cancel_mention(t);
         qtc_strlcpy(t->draft, t->input, sizeof(t->draft));
         t->replying = false;
     }
@@ -871,6 +883,7 @@ static void handle_enter(tui_ctx *t) {
 
 static void escape_mode(tui_ctx *t) {
     if (t->mode == MODE_COMPOSE) {
+        cancel_mention(t);
         qtc_strlcpy(t->draft, t->replying ? t->reply_backup : t->input, sizeof(t->draft));
         t->replying = false; t->mention_active = false;
     }
@@ -914,7 +927,8 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         return;
     }
     if (t->mode == MODE_COMPOSE && t->mention_active) {
-        if (c == 27) { t->mention_active = false; t->dirty = true; return; }
+        if (c == 27) { cancel_mention(t); return; }
+        if (c == '\t') return;
         if (c == '\r' || c == '\n') { accept_mention(t); return; }
     }
     if (t->view == VIEW_MESSAGES && t->open_key[0] && c == '\t' &&
@@ -1086,7 +1100,7 @@ static void special_key(tui_ctx *t, const char *seq) {
             else if (strcmp(seq, "\x1b[B") == 0 && t->mention_cursor + 1 < count) t->mention_cursor++;
             t->dirty = true; return;
         }
-        t->mention_active = false;
+        cancel_mention(t);
     }
     if (t->mode == MODE_MESSAGE_SELECT) {
         if (strcmp(seq, "\x1b[A") == 0) { move_message(t, -1); return; }
