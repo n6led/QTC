@@ -23,6 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
+#include <wctype.h>
 
 typedef enum { VIEW_MESSAGES, VIEW_CHANNELS, VIEW_NODES, VIEW_SETTINGS } tui_view;
 typedef enum {
@@ -510,8 +511,20 @@ static void leave_conversation(tui_ctx *t) {
     if (t->open_key[0]) report_active_conversation(t, false);
 }
 
+static void cancel_mention(tui_ctx *t) {
+    /* Only a bare active trigger is transient; typed queries are user text. */
+    if (t->mention_active && t->input_len == t->mention_start + 1 &&
+        t->input[t->mention_start] == '@') {
+        t->input_len = t->mention_start;
+        t->input[t->input_len] = 0;
+    }
+    t->mention_active = false;
+    t->dirty = true;
+}
+
 static void save_composer(tui_ctx *t) {
     if (t->mode == MODE_COMPOSE) {
+        cancel_mention(t);
         qtc_strlcpy(t->draft, t->input, sizeof(t->draft));
         t->replying = false;
     }
@@ -870,6 +883,7 @@ static void handle_enter(tui_ctx *t) {
 
 static void escape_mode(tui_ctx *t) {
     if (t->mode == MODE_COMPOSE) {
+        cancel_mention(t);
         qtc_strlcpy(t->draft, t->replying ? t->reply_backup : t->input, sizeof(t->draft));
         t->replying = false; t->mention_active = false;
     }
@@ -913,7 +927,8 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         return;
     }
     if (t->mode == MODE_COMPOSE && t->mention_active) {
-        if (c == 27) { t->mention_active = false; t->dirty = true; return; }
+        if (c == 27) { cancel_mention(t); return; }
+        if (c == '\t') return;
         if (c == '\r' || c == '\n') { accept_mention(t); return; }
     }
     if (t->view == VIEW_MESSAGES && t->open_key[0] && c == '\t' &&
@@ -1085,7 +1100,7 @@ static void special_key(tui_ctx *t, const char *seq) {
             else if (strcmp(seq, "\x1b[B") == 0 && t->mention_cursor + 1 < count) t->mention_cursor++;
             t->dirty = true; return;
         }
-        t->mention_active = false;
+        cancel_mention(t);
     }
     if (t->mode == MODE_MESSAGE_SELECT) {
         if (strcmp(seq, "\x1b[A") == 0) { move_message(t, -1); return; }
@@ -1497,6 +1512,40 @@ static void move_message(tui_ctx *t, int delta) {
     t->dirty = true;
 }
 
+static void load_logical_message(tui_ctx *t, size_t index, logical_message_view *view);
+
+/* A quote is single-line ordinary text. Invalid UTF-8 becomes '?' and control
+ * characters cannot reach the composer. Keep whitespace between words only. */
+static void reply_quote(const char *body, size_t budget, char *out) {
+    char normalized[QTC_MAX_TEXT];
+    size_t used = 0, remaining = strlen(body);
+    bool space = false;
+    while (remaining) {
+        wchar_t wc;
+        mbstate_t state = {0};
+        size_t n = mbrtowc(&wc, body, remaining, &state);
+        bool invalid = n == (size_t)-1 || n == (size_t)-2;
+        if (!invalid && (wc > 0x10ffff || (wc >= 0xd800 && wc <= 0xdfff))) invalid = true;
+        if (invalid) { n = 1; wc = L'?'; }
+        if (iswspace(wc)) space = used > 0;
+        else if (!iswcntrl(wc)) {
+            if (used + (space ? 1U : 0U) + n >= sizeof(normalized)) break;
+            if (space) normalized[used++] = ' ';
+            if (invalid) normalized[used++] = '?';
+            else { memcpy(normalized + used, body, n); used += n; }
+            space = false;
+        }
+        body += n; remaining -= n;
+    }
+    normalized[used] = 0;
+    if (used > budget) {
+        size_t cut = qtc_utf8_chunk_length(normalized, budget - 3);
+        while (cut && normalized[cut - 1] == ' ') cut--;
+        memcpy(out, normalized, cut);
+        memcpy(out + cut, "...", 4);
+    } else memcpy(out, normalized, used + 1);
+}
+
 static void reply_message(tui_ctx *t) {
     size_t indices[QTC_MAX_MESSAGES];
     size_t count = collect_logical_messages(t, indices, QTC_ARRAY_LEN(indices));
@@ -1506,9 +1555,24 @@ static void reply_message(tui_ctx *t) {
         if (strcmp(message_logical_key(m), t->selected_message)) continue;
         if (!display_sender(t, m, sender, sizeof(sender)) ||
             qtc_mention_prefix(sender, prefix, sizeof(prefix)) != 0) break;
+        logical_message_view view;
+        load_logical_message(t, indices[i], &view);
+        const char *body = view.text;
+        char parsed_sender[QTC_MAX_NAME];
+        if (m->conversation_kind == QTC_CONV_CHANNEL &&
+            qtc_channel_sender(body, parsed_sender, sizeof(parsed_sender)) &&
+            strcmp(parsed_sender, sender) == 0) body += strlen(parsed_sender) + 2;
         size_t prefix_len = strlen(prefix), draft_len = strlen(t->draft);
-        if (prefix_len + draft_len >= sizeof(t->input)) {
-            qtc_strlcpy(t->status, "Not enough room for reply mention; draft unchanged", sizeof(t->status));
+        size_t single_limit = m->conversation_kind == QTC_CONV_CONTACT ?
+                             QTC_DIRECT_RADIO_TEXT_MAX : QTC_CHANNEL_RADIO_TEXT_MAX;
+        /* Reserve half the bytes after the mention and "> " / " | " for
+         * new response text. Existing drafts may still use normal multipart. */
+        size_t quote_budget = (single_limit - prefix_len - 5) / 2;
+        char quote[QTC_MAX_TEXT];
+        reply_quote(body, quote_budget, quote);
+        size_t seed_len = prefix_len + 5 + strlen(quote);
+        if (seed_len + draft_len >= sizeof(t->input)) {
+            qtc_strlcpy(t->status, "Not enough room for quoted reply; draft unchanged", sizeof(t->status));
             t->dirty = true; return;
         }
         qtc_strlcpy(t->reply_backup, t->draft, sizeof(t->reply_backup));
@@ -1516,9 +1580,12 @@ static void reply_message(tui_ctx *t) {
         /* Build outside tui_ctx so fortified copies cannot alias its fields. */
         char reply[QTC_MAX_TEXT];
         memcpy(reply, prefix, prefix_len);
-        memcpy(reply + prefix_len, t->draft, draft_len + 1);
-        memcpy(t->input, reply, prefix_len + draft_len + 1);
-        t->input_len = prefix_len + draft_len; t->replying = true;
+        memcpy(reply + prefix_len, "> ", 2);
+        memcpy(reply + prefix_len + 2, quote, strlen(quote));
+        memcpy(reply + seed_len - 3, " | ", 3);
+        memcpy(reply + seed_len, t->draft, draft_len + 1);
+        memcpy(t->input, reply, seed_len + draft_len + 1);
+        t->input_len = seed_len + draft_len; t->replying = true;
         return;
     }
     qtc_strlcpy(t->status, "Reply unavailable: select an incoming message with a known sender", sizeof(t->status));

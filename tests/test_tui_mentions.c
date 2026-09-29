@@ -36,8 +36,91 @@ static void draw(tui_ctx *t) {
     screen_free(&s);
 }
 
+static void test_mention_cancel(void) {
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    int sockets[2]; ASSERT_EQ_INT(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+    t->fd = sockets[0]; t->open_kind = QTC_CONV_CONTACT; strcpy(t->open_key, "remote");
+    normal_key(t, 'm'); type_text(t, "@"); ASSERT_TRUE(t->mention_active);
+    normal_key(t, '\t'); ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
+    ASSERT_TRUE(t->mention_active); ASSERT_STREQ(t->draft, "");
+    normal_key(t, 27); ASSERT_STREQ(t->input, ""); ASSERT_EQ_INT(t->input_len, 0);
+    normal_key(t, '\r'); ASSERT_EQ_INT(t->mode, MODE_NORMAL);
+    char unexpected;
+    ASSERT_EQ_INT(recv(sockets[1], &unexpected, 1, MSG_DONTWAIT), -1);
+    ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
+    normal_key(t, 'm'); type_text(t, "@"); normal_key(t, 27); normal_key(t, 27);
+    normal_key(t, 'm'); ASSERT_STREQ(t->input, ""); ASSERT_STREQ(t->draft, "");
+    type_text(t, "Hello @"); normal_key(t, 27); ASSERT_STREQ(t->input, "Hello ");
+    normal_key(t, 27); normal_key(t, 'm'); ASSERT_STREQ(t->input, "Hello ");
+    type_text(t, "@query"); normal_key(t, 27); ASSERT_STREQ(t->input, "Hello @query");
+    t->input[0] = 0; t->input_len = 0;
+    type_text(t, "mail@example.com"); ASSERT_TRUE(!t->mention_active);
+    normal_key(t, 27); normal_key(t, 'm'); ASSERT_STREQ(t->input, "mail@example.com");
+    t->input[0] = 0; t->input_len = 0;
+    type_text(t, "@"); save_composer(t); ASSERT_STREQ(t->draft, "");
+    type_text(t, "@"); special_key(t, "\x1b[C"); ASSERT_STREQ(t->input, "");
+    /* Picker cancellation must not interfere with quoted-reply rollback. */
+    strcpy(t->reply_backup, "prior draft"); t->replying = true;
+    type_text(t, "@[A] > quote | @"); ASSERT_TRUE(t->mention_active);
+    normal_key(t, 27); ASSERT_STREQ(t->input, "@[A] > quote | ");
+    normal_key(t, 27); ASSERT_STREQ(t->draft, "prior draft");
+    close(sockets[0]); close(sockets[1]); free(t);
+}
+
+static void test_quoted_selection(void) {
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    t->fd = -1; t->width = 100; t->height = 28;
+    t->open_kind = QTC_CONV_CONTACT; strcpy(t->open_key, "remote");
+    t->state.contact_count = 1;
+    strcpy(t->state.contacts[0].id, "remote");
+    strcpy(t->state.contacts[0].name, "A");
+    t->state.contacts[0].node_type = QTC_NODE_PERSON;
+    add_message(t, "first", "first", "first message", 1, 1);
+    add_message(t, "second", "second", "second message", 1, 1);
+    strcpy(t->selected_message, "first"); t->mode = MODE_MESSAGE_SELECT;
+    t->history_scroll = 10; draw(t);
+    add_message(t, "third", "third", "newest message", 1, 1);
+    normal_key(t, 'r'); ASSERT_STREQ(t->input, "@[A] > first message | ");
+    type_text(t, "@"); ASSERT_TRUE(t->mention_active);
+    normal_key(t, '\r'); ASSERT_STREQ(t->input, "@[A] > first message | @[A] ");
+    escape_mode(t); ASSERT_STREQ(t->draft, "");
+    t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "0");
+    t->state.message_count = 0;
+    add_message(t, "older", "older", "A: first message", 1, 1);
+    add_message(t, "newer", "newer", "A: second message", 1, 1);
+    strcpy(t->selected_message, "older"); t->mode = MODE_MESSAGE_SELECT;
+    reply_message(t); ASSERT_STREQ(t->input, "@[A] > first message | ");
+    ASSERT_STREQ(t->state.messages[0].text, "A: first message");
+    escape_mode(t);
+    char long_text[QTC_MAX_TEXT] = "A: ";
+    for (int i = 0; i < 100; i++) strcat(long_text, "📡");
+    strcpy(t->state.messages[0].text, long_text);
+    t->mode = MODE_MESSAGE_SELECT; reply_message(t);
+    ASSERT_TRUE(strstr(t->input, "... | ") != NULL);
+    ASSERT_TRUE(strlen(t->input) <= QTC_CHANNEL_RADIO_TEXT_MAX);
+    ASSERT_TRUE(QTC_CHANNEL_RADIO_TEXT_MAX - strlen(t->input) >=
+                (QTC_CHANNEL_RADIO_TEXT_MAX - strlen("@[A] ") - 5) / 2);
+    mbstate_t state = {0}; const char *input = t->input;
+    ASSERT_TRUE(mbsrtowcs(NULL, &input, 0, &state) != (size_t)-1);
+    ASSERT_STREQ(t->state.messages[0].text, long_text);
+    escape_mode(t);
+    char quote[QTC_MAX_TEXT];
+    reply_quote(" \r\n Hello\t  there\v\f\xe2\x80\x83 world \n", 80, quote);
+    ASSERT_STREQ(quote, "Hello there world");
+    reply_quote("a\x1b\x01\xc2\x9f" "b\xff", 80, quote);
+    ASSERT_STREQ(quote, "ab?");
+    reply_quote("\xf4\x90\x80\x80", 80, quote);
+    ASSERT_STREQ(quote, "????");
+    reply_quote("@[B] > previous quote | a response that continues for many words", 24, quote);
+    ASSERT_TRUE(strlen(quote) <= 24); ASSERT_TRUE(strstr(quote, "...") != NULL);
+    reply_quote("short 📡 message", 80, quote); ASSERT_STREQ(quote, "short 📡 message");
+    free(t);
+}
+
 int main(void) {
     ASSERT_TRUE(setlocale(LC_CTYPE, "") != NULL);
+    test_mention_cancel();
+    test_quoted_selection();
     ASSERT_EQ_INT(wcwidth(L'\U0001f4e1'), 2);
     char name[QTC_MAX_NAME], prefix[QTC_MAX_NAME + 4];
     const char *names[] = {"KO6IFX-N2", "N6LED - OBSVR🥃", "🌱MeshGarden🍎 BOT", "Cafe\xcc\x81"};
@@ -82,7 +165,7 @@ int main(void) {
     special_key(t, "\x1b[B"); ASSERT_STREQ(t->selected_message, "new");
     special_key(t, "\x1b[A"); ASSERT_STREQ(t->selected_message, "logical");
     strcpy(t->draft, "existing draft");
-    normal_key(t, 'r'); ASSERT_STREQ(t->input, "@[KO6IFX-N2] existing draft");
+    normal_key(t, 'r'); ASSERT_STREQ(t->input, "@[KO6IFX-N2] > first second | existing draft");
     escape_mode(t); ASSERT_STREQ(t->draft, "existing draft");
     normal_key(t, '\t'); normal_key(t, 'r');
     /* The existing direct-send payload contains only the ordinary mention text. */
@@ -91,19 +174,19 @@ int main(void) {
     ASSERT_EQ_INT(qtc_ipc_recv_blocking(sockets[1], &frame, 1000), 0);
     ASSERT_EQ_INT(frame.type, QTC_IPC_SEND_DIRECT);
     qtc_ipc_send_direct_payload direct; memcpy(&direct, frame.payload, sizeof(direct));
-    ASSERT_STREQ(direct.text, "@[KO6IFX-N2] existing draft");
+    ASSERT_STREQ(direct.text, "@[KO6IFX-N2] > first second | existing draft");
     ASSERT_TRUE(!t->draft[0]);
 
     t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "0");
     t->state.message_count = 0; t->selected_message[0] = 0;
     add_message(t, "channel", "channel", "🌱MeshGarden🍎 BOT: latest reading", 1, 1);
     normal_key(t, '\t'); draw(t); normal_key(t, 'r');
-    ASSERT_STREQ(t->input, "@[🌱MeshGarden🍎 BOT] ");
+    ASSERT_STREQ(t->input, "@[🌱MeshGarden🍎 BOT] > latest reading | ");
     normal_key(t, '\r');
     ASSERT_EQ_INT(qtc_ipc_recv_blocking(sockets[1], &frame, 1000), 0);
     ASSERT_EQ_INT(frame.type, QTC_IPC_SEND_CHANNEL);
     qtc_ipc_send_channel_payload channel; memcpy(&channel, frame.payload, sizeof(channel));
-    ASSERT_STREQ(channel.text, "@[🌱MeshGarden🍎 BOT]");
+    ASSERT_STREQ(channel.text, "@[🌱MeshGarden🍎 BOT] > latest reading |");
     ASSERT_STREQ(t->state.messages[0].text, "🌱MeshGarden🍎 BOT: latest reading");
     /* Missing/ambiguous sender and a draft too large for a prefix are safe. */
     t->mode = MODE_MESSAGE_SELECT;
@@ -125,11 +208,11 @@ int main(void) {
     ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
     type_text(t, "@"); normal_key(t, 27);
     ASSERT_TRUE(!t->mention_active); ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ");
     type_text(t, "ordinary");
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @ordinary");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ordinary");
     escape_mode(t); start_input(t, MODE_COMPOSE);
-    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] @ordinary");
+    ASSERT_STREQ(t->input, "hello @[KO6IFX-N2] ordinary");
     t->input[0] = 0; t->input_len = 0; t->draft[0] = 0;
     type_text(t, "@🌱"); normal_key(t, '\r');
     ASSERT_STREQ(t->input, "@[🌱MeshGarden🍎 BOT] ");

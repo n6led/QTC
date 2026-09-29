@@ -32,7 +32,9 @@ Waiting-message pushes trigger immediate stored-message retrieval until the radi
 
 ## Reply and mention text
 
-Replies insert the human-readable `@[Name] ` convention into the normal composer.
+Replies insert human-readable `@[Name] > selected body | ` into the normal composer.
+The selected logical message supplies a bounded, single-line quote; a recognized
+channel sender prefix is omitted from the quote. The stored message is unchanged.
 The existing direct/channel text send path handles the result, including its
 existing multipart behavior. Selection uses local logical keys only inside the
 TUI; these keys and database IDs are never added to the outgoing text.
