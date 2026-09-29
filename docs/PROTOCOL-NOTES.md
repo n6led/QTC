@@ -30,6 +30,30 @@ QTC uses the Companion protocol operations for:
 
 Waiting-message pushes trigger immediate stored-message retrieval until the radio reports that no messages remain. Interactive sends and receive work are prioritized over background roster refreshes.
 
+## Reply and mention text
+
+Replies insert the human-readable `@[Name] ` convention into the normal composer.
+The existing direct/channel text send path handles the result, including its
+existing multipart behavior. Selection uses local logical keys only inside the
+TUI; these keys and database IDs are never added to the outgoing text.
+
+Direct sender display comes from the contact identified by the message's
+conversation key, not its text. Channel messages have no separately stored sender
+identity in QTC. MeshCore's
+[BaseChatMesh::sendGroupMessage](https://github.com/meshcore-dev/MeshCore/blob/main/src/helpers/BaseChatMesh.cpp)
+prepends `<sender>: ` to channel text. QTC recognizes only incoming channel text
+whose first colon is followed by an ASCII space, with 1–31 bytes before the colon
+(the Companion's 32-byte name buffer includes NUL). The name must be valid UTF-8,
+without control characters, brackets, or leading/trailing spaces. Missing or
+ambiguous prefixes are left unknown; names containing colons are not supported.
+For an existing multipart group, the first part supplies this display prefix;
+without that part, the sender stays unknown. Received text is not rewritten.
+
+This is a display convention, not cryptographic sender verification. A sender can
+spoof it, and unconventional channel clients may not supply a usable prefix.
+QTC does not infer direct senders from this convention, add persistent sender
+fields, or change existing fragment assembly.
+
 ## Upstream documentation
 
 - https://docs.meshcore.io/companion_protocol/

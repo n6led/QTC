@@ -154,6 +154,9 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 | `g` | Set favorite group |
 | `/` | Search |
 | `Page Up` / `Page Down` | Scroll conversation history |
+| `Tab` | Focus logical messages in an open conversation; press again for roster |
+| `Up` / `Down`, `j` / `k` in message selection | Select previous/next logical message |
+| `r` in message selection | Reply with a sender mention; does not send |
 | `F4` / `s` | Settings |
 | `F5` | Reconnect radio |
 | `F6` | Channels |
@@ -161,6 +164,50 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 | `F8` / `Ctrl+C` | Detach this terminal; keep QTC running |
 | `Ctrl+Q` twice | Stop QTC completely and release USB |
 | `Esc` | Cancel or return |
+
+### Replies and mentions
+
+Open a conversation, then press `Tab` to select messages. The selected message's
+metadata is highlighted and its text has a `>` marker. Up/Down or j/k moves one
+logical message; Page Up/Down jumps five messages. Existing multipart groups are
+one selectable item. Selection follows the local logical key across new arrivals
+and resizing; if that message leaves the in-memory history, a visible message is
+selected instead. Tab or Escape returns to roster navigation. `m` resumes writing.
+
+Press `r` on an incoming message with a known sender to seed the composer with
+`@[Sender] `, including a trailing space. For example, a reply to MeshGarden BOT
+starts `@[MeshGarden BOT] `. Nothing is sent until you press Enter in the composer.
+No quotation or local message identifier is added. Outbound messages and unknown
+senders do not offer Reply; use `m` to write normally.
+
+Direct replies use the known contact's display name (local alias if set). Channel
+replies recognize the conventional `Name: ` prefix, not arbitrary colon-separated
+text. These channel names are unverified display information. See
+[protocol notes](docs/PROTOCOL-NOTES.md#reply-and-mention-text) for the exact rule.
+
+Typing `@` at the beginning of the composer or after a space opens suggestions.
+Continue typing to filter using the existing roster search rules, use Up/Down to
+choose, and Enter to insert `@[Exact Display Name] ` without sending. Escape closes
+suggestions and keeps what you typed. Typing `[` closes suggestions so you can
+enter a mention manually. Ordinary text such as `mail@example.com` stays ordinary
+text. Candidates are deduplicated: recent incoming senders in this conversation,
+the direct contact, then known people, with a maximum of 64 matching names. No
+participant database is created. Names with spaces, hyphens, numbers, Unicode, and
+emoji are preserved; malformed UTF-8, control characters, and names containing
+`[` or `]` are excluded. Complete `@[Name]` mentions use the theme's accent style,
+including when wrapped, without altering stored text or notification behavior.
+
+A single draft is kept in memory for the open conversation. Escape from ordinary
+composition saves it; `m` resumes it. Reply prepends a mention to that draft rather
+than replacing it. Escape from reply composition restores the pre-reply draft;
+Tab or switching views keeps the edited reply as the draft. To prevent accidental
+loss, opening a different conversation is blocked while a draft exists: resume it,
+send it, or erase its contents and press Enter to discard it. Drafts are not saved
+across TUI detach or process exit.
+
+Replies remain ordinary MeshCore text, for example `@[N6LED] Yes, that worked.`
+The existing message-size and multipart handling applies unchanged. No new packet
+type, reply ID, private header, database schema, or IPC payload is introduced.
 
 ### Channels
 
