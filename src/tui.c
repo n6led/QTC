@@ -1888,6 +1888,15 @@ static void render_channels(tui_ctx *t, screen *s) {
 
 static void render_nodes(tui_ctx *t, screen *s) {
     render_page_header(s, "NETWORK NODES", "Repeaters and infrastructure are separate from people you message.");
+    /* Reserve metadata columns from the right; names cannot move them. */
+    int key_col = t->width - 16;
+    int route_col = key_col - 11;
+    int type_col = route_col - 10;
+    int name_col = 7, name_width = type_col - name_col - 2;
+    screen_put_text(s, 5, name_col, name_width, "Name", UI_SECTION);
+    screen_put_text(s, 5, type_col, 8, "Type", UI_SECTION);
+    screen_put_text(s, 5, route_col, 9, "Route", UI_SECTION);
+    screen_put_text(s, 5, key_col, 12, "Key", UI_SECTION);
     int row = 6;
     int idx[QTC_MAX_CONTACTS];
     size_t n = node_selection(t, idx);
@@ -1899,7 +1908,15 @@ static void render_nodes(tui_ctx *t, screen *s) {
         char route[32];
         if (!c->route_known) qtc_strlcpy(route, "flood", sizeof(route));
         else snprintf(route, sizeof(route), "%d hop%s", c->route_hops, c->route_hops == 1 ? "" : "s");
-        screen_put_fmt(s, row, 4, t->width - 9, style, "%c  %-28s  %-10s  %-9s  key %.12s", selected ? '>' : ' ', contact_name(c), qtc_node_type_label(c->node_type), route, c->prefix);
+        screen_put_text(s, row, 4, 1, selected ? ">" : " ", style);
+        const char *name = contact_name(c);
+        if (name_width > 3 && text_width(name) > name_width) {
+            screen_put_text(s, row, name_col, name_width - 3, name, style);
+            screen_put_text(s, row, name_col + name_width - 3, 3, "...", style);
+        } else screen_put_text(s, row, name_col, name_width, name, style);
+        screen_put_text(s, row, type_col, 8, qtc_node_type_label(c->node_type), style);
+        screen_put_text(s, row, route_col, 9, route, style);
+        screen_put_text(s, row, key_col, 12, c->prefix, style);
         row++;
     }
     if (!n) screen_put_text(s, row, 5, t->width - 10, "No repeaters, rooms, sensors, or unknown nodes.", UI_MUTED);

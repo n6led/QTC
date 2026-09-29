@@ -26,8 +26,50 @@ static void draw(tui_ctx *t, char *text, size_t cap) {
     screen_free(&s);
 }
 
+static void test_columns(void) {
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    t->height = 18; t->state.contact_count = 3;
+    for (size_t i = 0; i < 3; i++) {
+        qtc_contact *c = &t->state.contacts[i];
+        snprintf(c->id, sizeof(c->id), "node%zu", i);
+        strcpy(c->prefix, "012345abcdef");
+        c->node_type = QTC_NODE_REPEATER;
+    }
+    strcpy(t->state.contacts[0].name, "Short📡");
+    memset(t->state.contacts[1].name, 'A', sizeof(t->state.contacts[1].name) - 1);
+    for (int i = 0; i < 23; i++) strcat(t->state.contacts[2].name, "📡");
+    strcpy(t->selected_node, "node2");
+    const int widths[] = {68, 80, 100};
+    for (size_t i = 0; i < QTC_ARRAY_LEN(widths); i++) {
+        t->width = widths[i];
+        screen s; ASSERT_EQ_INT(screen_init(&s, t->width, t->height), 0);
+        render_nodes(t, &s);
+        int key = t->width - 16, route = key - 11, type = route - 10;
+        ASSERT_EQ_INT(screen_at(&s, 5, 7)->bytes[0], 'N');
+        ASSERT_EQ_INT(screen_at(&s, 5, type)->bytes[0], 'T');
+        for (int row = 6; row < 9; row++) {
+            ASSERT_EQ_INT(screen_at(&s, row, type)->bytes[0], 'r');
+            ASSERT_EQ_INT(screen_at(&s, row, route)->bytes[0], 'f');
+            for (int j = 0; j < 12; j++)
+                ASSERT_EQ_INT(screen_at(&s, row, key + j)->bytes[0], "012345abcdef"[j]);
+            ASSERT_EQ_INT(screen_at(&s, row, type - 1)->bytes[0], ' ');
+            ASSERT_EQ_INT(screen_at(&s, row, type - 2)->bytes[0], ' ');
+            if (row == 7 || (row == 8 && t->width < 100))
+                for (int j = type - 5; j < type - 2; j++)
+                    ASSERT_EQ_INT(screen_at(&s, row, j)->bytes[0], '.');
+        }
+        ASSERT_EQ_INT(screen_at(&s, 8, 4)->bytes[0], '>');
+        for (int col = 3; col < t->width - 4; col++)
+            ASSERT_EQ_INT(screen_at(&s, 8, col)->style, UI_SELECTED);
+        ASSERT_TRUE(screen_at(&s, 8, 8)->continuation);
+        screen_free(&s);
+    }
+    free(t);
+}
+
 int main(void) {
     ASSERT_TRUE(setlocale(LC_CTYPE, "") != NULL);
+    test_columns();
     tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
     t->fd = -1; t->view = VIEW_NODES; t->width = 100; t->height = 18;
     char text[40000];
