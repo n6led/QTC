@@ -32,7 +32,8 @@ typedef enum {
     MODE_NORMAL, MODE_SEARCH, MODE_COMPOSE, MODE_CREATE_CHANNEL, MODE_JOIN_CHANNEL,
     MODE_INVITE_PICKER, MODE_INVITE_REVIEW, MODE_ROTATE_CONFIRM, MODE_LEAVE_CONFIRM,
     MODE_INCOMING_INVITE, MODE_ALIAS, MODE_FAVORITE_GROUP, MODE_DEVICE_NAME,
-    MODE_TX_POWER, MODE_THEME_PICKER, MODE_PRESET_PICKER, MODE_MESSAGE_SELECT
+    MODE_TX_POWER, MODE_THEME_PICKER, MODE_PRESET_PICKER, MODE_MESSAGE_SELECT,
+    MODE_NODE_DETAIL
 } tui_mode;
 
 typedef struct {
@@ -78,6 +79,9 @@ typedef struct {
     char selected_key[QTC_MAX_ID];
     int selected_channel;
     char selected_node[QTC_MAX_ID];
+    size_t node_position;
+    size_t node_scroll;
+    size_t node_detail_scroll;
     size_t contact_scroll;
     size_t history_scroll;
     qtc_conversation_kind open_kind;
@@ -711,6 +715,50 @@ static void apply_preset(tui_ctx *t) {
     snprintf(t->status, sizeof(t->status), "%s preset queued", preset->name);
 }
 
+/* Positions and viewport offsets refer only to the filtered infrastructure list. */
+static size_t node_rows(const tui_ctx *t) {
+    return t->height > 9 ? (size_t)(t->height - 9) : 1;
+}
+
+static size_t node_selection(tui_ctx *t, int *idx) {
+    size_t n = 0;
+    for (size_t i = 0; i < t->state.contact_count; i++)
+        if (t->state.contacts[i].node_type != QTC_NODE_PERSON) idx[n++] = (int)i;
+    if (!n) {
+        t->selected_node[0] = 0;
+        t->node_position = t->node_scroll = 0;
+        return 0;
+    }
+    size_t pos = 0;
+    while (pos < n && strcmp(t->state.contacts[idx[pos]].id, t->selected_node)) pos++;
+    if (pos == n) pos = t->node_position < n ? t->node_position : n - 1;
+    t->node_position = pos;
+    qtc_strlcpy(t->selected_node, t->state.contacts[idx[pos]].id, sizeof(t->selected_node));
+    qtc_roster_clamp(pos, n, node_rows(t), &t->node_scroll);
+    return n;
+}
+
+static void move_nodes(tui_ctx *t, int delta) {
+    int idx[QTC_MAX_CONTACTS];
+    size_t n = node_selection(t, idx);
+    if (!n) return;
+    int next = (int)t->node_position + delta;
+    if (next < 0) next = 0;
+    if ((size_t)next >= n) next = (int)n - 1;
+    t->node_position = (size_t)next;
+    qtc_strlcpy(t->selected_node, t->state.contacts[idx[next]].id, sizeof(t->selected_node));
+    qtc_roster_clamp(t->node_position, n, node_rows(t), &t->node_scroll);
+    t->dirty = true;
+}
+
+static void scroll_node_detail(tui_ctx *t, int delta) {
+    if (delta < 0) {
+        size_t step = (size_t)-delta;
+        t->node_detail_scroll = t->node_detail_scroll > step ? t->node_detail_scroll - step : 0;
+    } else t->node_detail_scroll += (size_t)delta;
+    t->dirty = true;
+}
+
 static void handle_enter(tui_ctx *t) {
     if (t->mode == MODE_SEARCH) { t->mode = MODE_NORMAL; t->dirty = true; return; }
     if (t->mode == MODE_COMPOSE) { send_composed(t); return; }
@@ -802,6 +850,13 @@ static void handle_enter(tui_ctx *t) {
         (void)qtc_ipc_send(t->fd, t->confirm_action ? QTC_IPC_INVITE_ACCEPT : QTC_IPC_INVITE_IGNORE, &id, sizeof(id));
         t->mode = MODE_NORMAL; t->confirm_action = false; t->dirty = true; return;
     }
+    if (t->view == VIEW_NODES) {
+        int idx[QTC_MAX_CONTACTS];
+        if (t->mode == MODE_NORMAL && node_selection(t, idx)) {
+            t->mode = MODE_NODE_DETAIL; t->node_detail_scroll = 0; t->dirty = true;
+        }
+        return;
+    }
     if (t->view == VIEW_MESSAGES) {
         if (!open_selected(t)) return;
         if (t->open_key[0]) start_input(t, MODE_COMPOSE);
@@ -835,18 +890,6 @@ static void move_channels(tui_ctx *t, int delta) {
     t->selected_channel = slots[next]; t->dirty = true;
 }
 
-static void move_nodes(tui_ctx *t, int delta) {
-    int idx[QTC_MAX_CONTACTS]; size_t n = 0;
-    for (size_t i = 0; i < t->state.contact_count; i++) if (t->state.contacts[i].node_type != QTC_NODE_PERSON) idx[n++] = (int)i;
-    if (!n) { t->selected_node[0] = 0; return; }
-    size_t pos = 0; while (pos < n && strcmp(t->state.contacts[idx[pos]].id, t->selected_node) != 0) pos++;
-    if (pos == n) pos = 0;
-    int next = (int)pos + delta;
-    if (next < 0) next = 0;
-    if ((size_t)next >= n) next = (int)n - 1;
-    qtc_strlcpy(t->selected_node, t->state.contacts[idx[next]].id, sizeof(t->selected_node)); t->dirty = true;
-}
-
 static void first_pending_invite(tui_ctx *t) {
     for (size_t i = 0; i < t->state.invitation_count; i++) if (t->state.invitations[i].status == QTC_INVITE_PENDING) {
         t->incoming_invite_id = t->state.invitations[i].id; t->mode = MODE_INCOMING_INVITE; t->confirm_action = false;
@@ -861,6 +904,12 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         int64_t now = qtc_now_millis();
         if (now - t->last_ctrl_q < 2000) { (void)qtc_ipc_send(t->fd, QTC_IPC_SHUTDOWN, NULL, 0); t->running = false; }
         else { t->last_ctrl_q = now; qtc_strlcpy(t->status, "Press Ctrl+Q again to stop the background core", sizeof(t->status)); t->dirty = true; }
+        return;
+    }
+    if (t->mode == MODE_NODE_DETAIL) {
+        if (c == 'j') scroll_node_detail(t, 1);
+        else if (c == 'k') scroll_node_detail(t, -1);
+        else if (c == 27) escape_mode(t);
         return;
     }
     if (t->mode == MODE_COMPOSE && t->mention_active) {
@@ -1021,6 +1070,13 @@ static void normal_key(tui_ctx *t, unsigned char c) {
 }
 
 static void special_key(tui_ctx *t, const char *seq) {
+    if (t->mode == MODE_NODE_DETAIL) {
+        if (strcmp(seq, "\x1b[A") == 0) { scroll_node_detail(t, -1); return; }
+        if (strcmp(seq, "\x1b[B") == 0) { scroll_node_detail(t, 1); return; }
+        if (strcmp(seq, "\x1b[5~") == 0) { scroll_node_detail(t, -(int)node_rows(t)); return; }
+        if (strcmp(seq, "\x1b[6~") == 0) { scroll_node_detail(t, (int)node_rows(t)); return; }
+        if (strcmp(seq, "\x1b[18~") == 0) { escape_mode(t); return; }
+    }
     if (t->mode == MODE_COMPOSE && t->mention_active) {
         if (strcmp(seq, "\x1b[A") == 0 || strcmp(seq, "\x1b[B") == 0) {
             char names[MENTION_CANDIDATES][QTC_MAX_NAME];
@@ -1832,26 +1888,92 @@ static void render_channels(tui_ctx *t, screen *s) {
 
 static void render_nodes(tui_ctx *t, screen *s) {
     render_page_header(s, "NETWORK NODES", "Repeaters and infrastructure are separate from people you message.");
+    /* Reserve metadata columns from the right; names cannot move them. */
+    int key_col = t->width - 16;
+    int route_col = key_col - 11;
+    int type_col = route_col - 10;
+    int name_col = 7, name_width = type_col - name_col - 2;
+    screen_put_text(s, 5, name_col, name_width, "Name", UI_SECTION);
+    screen_put_text(s, 5, type_col, 8, "Type", UI_SECTION);
+    screen_put_text(s, 5, route_col, 9, "Route", UI_SECTION);
+    screen_put_text(s, 5, key_col, 12, "Key", UI_SECTION);
     int row = 6;
-    bool any = false;
-    for (size_t i = 0; i < t->state.contact_count && row < t->height - 3; i++) {
-        qtc_contact *c = &t->state.contacts[i];
-        if (c->node_type == QTC_NODE_PERSON) continue;
-        any = true;
-        if (!t->selected_node[0]) qtc_strlcpy(t->selected_node, c->id, sizeof(t->selected_node));
+    int idx[QTC_MAX_CONTACTS];
+    size_t n = node_selection(t, idx);
+    for (size_t i = t->node_scroll; i < n && row < t->height - 3; i++) {
+        qtc_contact *c = &t->state.contacts[idx[i]];
         bool selected = strcmp(t->selected_node, c->id) == 0;
         ui_style style = selected ? UI_SELECTED : UI_NORMAL;
         screen_fill(s, row, 3, t->width - 7, style);
         char route[32];
         if (!c->route_known) qtc_strlcpy(route, "flood", sizeof(route));
         else snprintf(route, sizeof(route), "%d hop%s", c->route_hops, c->route_hops == 1 ? "" : "s");
-        screen_put_fmt(s, row, 4, t->width - 9, style, "%c  %-28s  %-10s  %-9s  key %.12s", selected ? '>' : ' ', contact_name(c), qtc_node_type_label(c->node_type), route, c->prefix);
+        screen_put_text(s, row, 4, 1, selected ? ">" : " ", style);
+        const char *name = contact_name(c);
+        if (name_width > 3 && text_width(name) > name_width) {
+            screen_put_text(s, row, name_col, name_width - 3, name, style);
+            screen_put_text(s, row, name_col + name_width - 3, 3, "...", style);
+        } else screen_put_text(s, row, name_col, name_width, name, style);
+        screen_put_text(s, row, type_col, 8, qtc_node_type_label(c->node_type), style);
+        screen_put_text(s, row, route_col, 9, route, style);
+        screen_put_text(s, row, key_col, 12, c->prefix, style);
         row++;
     }
-    if (!any) screen_put_text(s, row, 5, t->width - 10, "No repeaters, rooms, sensors, or unknown nodes.", UI_MUTED);
+    if (!n) screen_put_text(s, row, 5, t->width - 10, "No repeaters, rooms, sensors, or unknown nodes.", UI_MUTED);
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
-    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down Select  F7 Back  Esc Back", UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k Select  Enter Details  F7/Esc Back", UI_STATUS);
     screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
+}
+
+static void render_node_detail(tui_ctx *t, screen *s) {
+    render_page_header(s, "NETWORK NODE DETAIL", "Cached information; opening this page sends no radio query.");
+    /* Do not silently switch the inspected identity if it disappears. */
+    qtc_contact *c = find_contact(t, t->selected_node);
+    char fields[14][512];
+    size_t count = 0;
+    if (c == NULL || c->node_type == QTC_NODE_PERSON) {
+        qtc_strlcpy(fields[count++], "Node is no longer available. Press Esc to return to the list.", sizeof(fields[0]));
+    } else {
+        snprintf(fields[count++], sizeof(fields[0]), "Name: %s", contact_name(c));
+        snprintf(fields[count++], sizeof(fields[0]), "Original name: %s", c->name[0] ? c->name : "unknown");
+        snprintf(fields[count++], sizeof(fields[0]), "Alias: %s", c->alias[0] ? c->alias : "none");
+        snprintf(fields[count++], sizeof(fields[0]), "Type: %s (%d)", qtc_node_type_label(c->node_type), c->node_type);
+        snprintf(fields[count++], sizeof(fields[0]), "Node ID: %s", c->id);
+        snprintf(fields[count++], sizeof(fields[0]), "Prefix: %s", c->prefix);
+        if (c->route_known) snprintf(fields[count++], sizeof(fields[0]), "Route: known, %d hop%s", c->route_hops, c->route_hops == 1 ? "" : "s");
+        else qtc_strlcpy(fields[count++], "Route: flood (unknown route)", sizeof(fields[0]));
+        char date[80] = "unknown";
+        time_t stamp = (time_t)c->last_heard;
+        struct tm local;
+        if (c->last_heard > 0 && localtime_r(&stamp, &local) != NULL)
+            (void)strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S %Z", &local);
+        snprintf(fields[count++], sizeof(fields[0]), "Last heard: %s", date);
+        qtc_strlcpy(fields[count++], "Location: unavailable/unverified (no stored validity indicator)", sizeof(fields[0]));
+        snprintf(fields[count++], sizeof(fields[0]), "Favorite: %s", c->favorite ? "yes" : "no");
+        snprintf(fields[count++], sizeof(fields[0]), "Favorite group: %s", c->favorite_group[0] ? c->favorite_group : "none");
+        snprintf(fields[count++], sizeof(fields[0]), "Unread: %d", c->unread);
+        snprintf(fields[count++], sizeof(fields[0]), "Flags: 0x%02X", (unsigned)c->flags);
+    }
+    int width = t->width - 10;
+    size_t lines = 0;
+    for (size_t i = 0; i < count; i++) lines += (size_t)wrapped_line_count(fields[i], width);
+    size_t rows = node_rows(t), max = lines > rows ? lines - rows : 0;
+    if (t->node_detail_scroll > max) t->node_detail_scroll = max;
+    size_t line = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t offset = 0;
+        do {
+            char segment[512]; size_t next;
+            (void)wrapped_segment(fields[i], offset, width, segment, sizeof(segment), &next);
+            if (line >= t->node_detail_scroll && line - t->node_detail_scroll < rows)
+                screen_put_text(s, 6 + (int)(line - t->node_detail_scroll), 5, width, segment, UI_NORMAL);
+            line++; offset = next;
+        } while (offset < strlen(fields[i]));
+    }
+    screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k PgUp/PgDn Scroll  Esc/F7 Back", UI_STATUS);
+    screen_put_fmt(s, t->height - 1, 1, t->width - 3, UI_MUTED, "Lines %zu-%zu of %zu", t->node_detail_scroll + 1,
+                   t->node_detail_scroll + (lines < rows ? lines : rows), lines);
 }
 
 static const char *onoff(bool value) { return value ? "ON" : "OFF"; }
@@ -2092,10 +2214,13 @@ static void render(tui_ctx *t) {
     } else {
         if (t->view == VIEW_MESSAGES) render_messages(t, &s);
         else if (t->view == VIEW_CHANNELS) render_channels(t, &s);
-        else if (t->view == VIEW_NODES) render_nodes(t, &s);
+        else if (t->view == VIEW_NODES) {
+            if (t->mode == MODE_NODE_DETAIL) render_node_detail(t, &s);
+            else render_nodes(t, &s);
+        }
         else render_settings(t, &s);
         if (t->mode != MODE_NORMAL && t->mode != MODE_SEARCH && t->mode != MODE_COMPOSE &&
-            t->mode != MODE_MESSAGE_SELECT) render_modal(t, &s);
+            t->mode != MODE_MESSAGE_SELECT && t->mode != MODE_NODE_DETAIL) render_modal(t, &s);
     }
 
     /* Allow for cell bytes, style changes, and Unicode cursor re-anchors. */
