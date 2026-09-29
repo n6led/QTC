@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <sqlite3.h>
 
-#define QTC_VERSION "1.1.1"
+#define QTC_VERSION "1.2.0"
 #define QTC_APP_NAME "qtc"
 #define QTC_DB_SCHEMA_VERSION 10
 #define QTC_MAX_CONTACTS 1024
