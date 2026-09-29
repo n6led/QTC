@@ -46,6 +46,7 @@ build/tests/%: tests/%.c $(LIB_OBJ) | build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB_OBJ) $(LDLIBS)
 
 build/tests/test_tui_mentions: tests/test_tui_mentions.c src/tui.c
+build/tests/test_tui_nodes: tests/test_tui_nodes.c src/tui.c
 
 unit-test: $(TEST_BIN)
 	@set -e; for t in $(TEST_BIN); do echo "== $$t =="; "$$t"; done

@@ -160,7 +160,7 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 | `F4` / `s` | Settings |
 | `F5` | Reconnect radio |
 | `F6` | Channels |
-| `F7` | Network Nodes |
+| `F7` | Network Nodes: Up/Down or j/k selects with automatic scrolling; Enter opens cached details; Esc/F7 returns |
 | `F8` / `Ctrl+C` | Detach this terminal; keep QTC running |
 | `Ctrl+Q` twice | Stop QTC completely and release USB |
 | `Esc` | Cancel or return |
