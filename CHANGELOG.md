@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.0
+
+### Added / Improved
+
+- Select logical messages in history and press `r` to reply with interoperable
+  `@[Name]` text.
+- Add `@` autocomplete and incoming mention highlighting, supporting Unicode and
+  emoji participant names in the reply/mention workflow.
+- Auto-scroll the F7 Network Nodes list to keep selection visible.
+- Press Enter in F7 to inspect cached node metadata in a read-only detail view;
+  Escape returns to the list with the same node selected.
+- Align F7 list columns and truncate long ASCII and Unicode names by display width.
+
+### Compatibility / Notes
+
+- Replies and mentions remain ordinary readable MeshCore text; no proprietary
+  on-air metadata is introduced.
+
 ## v1.1.1
 
 - Fixed TUI divider misalignment on rows containing wide Unicode / emoji characters.

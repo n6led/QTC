@@ -165,6 +165,30 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 | `Ctrl+Q` twice | Stop QTC completely and release USB |
 | `Esc` | Cancel or return |
 
+### Network Nodes
+
+Press `F7` to open Network Nodes. Up/Down or j/k selects non-person nodes; the
+list scrolls automatically to keep selection visible. Columns stay aligned and
+long names are truncated by display width. Enter opens the selected node's
+read-only detail page. Esc or F7 returns to the list with that node selected;
+from the list, Esc or F7 returns to Messages. In details, Up/Down, j/k, or
+Page Up/Page Down scrolls the content.
+
+Details use cached information and send no radio queries. They show display and
+original names, alias, node type, full node ID, short prefix, route state/hops,
+last heard, favorite/group state, unread count, and stored flags. Unknown last
+heard is labeled unknown. Location is marked unavailable/unverified because QTC
+does not store a reliable validity indicator. Remote firmware, battery, hardware
+model, and capabilities are not shown.
+
+### Terminal compatibility
+
+Wide emoji have been observed to render clipped in Raspberry Pi Connect's web
+terminal with QTC's cursor-positioned TUI output. The same build renders them
+correctly in ordinary SSH terminals. QTC's UTF-8 output and wcwidth-based cursor
+positioning were verified during investigation; this is a terminal compatibility
+issue, not a general QTC Unicode failure.
+
 ### Replies and mentions
 
 Open a conversation, then press `Tab` to select messages. The selected message's

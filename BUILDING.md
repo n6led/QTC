@@ -133,8 +133,8 @@ must still point to an executable for the host architecture.
 Artifacts are written to `dist/` (where `<arch>` is `x86_64` or `aarch64`):
 
 - `qtc-linux-<arch>`
-- `qtc-terminal-1.1.1-linux-<arch>.tar.gz`
-- `qtc-terminal-1.1.1-source.tar.gz`
+- `qtc-terminal-1.2.0-linux-<arch>.tar.gz`
+- `qtc-terminal-1.2.0-source.tar.gz`
 - `CHANGELOG.md`
 - `BUILDING.md`
 - `RELEASE-MANIFEST.txt`
