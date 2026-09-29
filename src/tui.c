@@ -3,6 +3,7 @@
 #include "qtc/invite.h"
 #include "qtc/ipc.h"
 #include "qtc/message.h"
+#include "qtc/mention.h"
 #include "qtc/notify.h"
 #include "qtc/roster.h"
 #include "qtc/util.h"
@@ -31,7 +32,7 @@ typedef enum {
     MODE_NORMAL, MODE_SEARCH, MODE_COMPOSE, MODE_CREATE_CHANNEL, MODE_JOIN_CHANNEL,
     MODE_INVITE_PICKER, MODE_INVITE_REVIEW, MODE_ROTATE_CONFIRM, MODE_LEAVE_CONFIRM,
     MODE_INCOMING_INVITE, MODE_ALIAS, MODE_FAVORITE_GROUP, MODE_DEVICE_NAME,
-    MODE_TX_POWER, MODE_THEME_PICKER, MODE_PRESET_PICKER
+    MODE_TX_POWER, MODE_THEME_PICKER, MODE_PRESET_PICKER, MODE_MESSAGE_SELECT
 } tui_mode;
 
 typedef struct {
@@ -66,6 +67,13 @@ typedef struct {
     char search[QTC_MAX_NAME];
     char input[QTC_MAX_TEXT];
     size_t input_len;
+    char draft[QTC_MAX_TEXT];
+    char reply_backup[QTC_MAX_TEXT];
+    bool replying;
+    char selected_message[160];
+    bool mention_active;
+    size_t mention_start;
+    size_t mention_cursor;
     int selected_kind;
     char selected_key[QTC_MAX_ID];
     int selected_channel;
@@ -109,6 +117,8 @@ static const radio_preset RADIO_PRESETS[] = {
 static volatile sig_atomic_t g_resize;
 static void sigwinch_handler(int sig) { (void)sig; g_resize = 1; }
 static const char *theme_name(int index);
+static void move_message(tui_ctx *t, int delta);
+static void reply_message(tui_ctx *t);
 
 static void set_action_feedback(tui_ctx *t, const char *message,
                                 feedback_level level, int64_t duration_ms) {
@@ -496,7 +506,16 @@ static void leave_conversation(tui_ctx *t) {
     if (t->open_key[0]) report_active_conversation(t, false);
 }
 
+static void save_composer(tui_ctx *t) {
+    if (t->mode == MODE_COMPOSE) {
+        qtc_strlcpy(t->draft, t->input, sizeof(t->draft));
+        t->replying = false;
+    }
+    t->mention_active = false;
+}
+
 static void set_view(tui_ctx *t, tui_view view) {
+    save_composer(t);
     if (t->view == VIEW_MESSAGES && view != VIEW_MESSAGES) leave_conversation(t);
     t->view = view;
     t->mode = MODE_NORMAL;
@@ -504,18 +523,31 @@ static void set_view(tui_ctx *t, tui_view view) {
     t->dirty = true;
 }
 
-static void open_selected(tui_ctx *t) {
+static bool open_selected(tui_ctx *t) {
+    qtc_conversation_kind kind = t->selected_kind == 1 ? QTC_CONV_CHANNEL : QTC_CONV_CONTACT;
+    bool changed = kind != t->open_kind || strcmp(t->selected_key, t->open_key) != 0;
+    if (changed && t->draft[0]) {
+        qtc_strlcpy(t->status, "Draft kept in current conversation; m to resume, clear and Enter to discard", sizeof(t->status));
+        t->dirty = true; return false;
+    }
     if (t->selected_kind == 1) { t->open_kind = QTC_CONV_CHANNEL; qtc_strlcpy(t->open_key, t->selected_key, sizeof(t->open_key)); }
     else if (t->selected_kind == 2 || t->selected_kind == 3) { t->open_kind = QTC_CONV_CONTACT; qtc_strlcpy(t->open_key, t->selected_key, sizeof(t->open_key)); }
-    else return;
+    else return false;
     qtc_ipc_mark_read_payload p = {.kind = t->open_kind}; qtc_strlcpy(p.key, t->open_key, sizeof(p.key));
     (void)qtc_ipc_send(t->fd, QTC_IPC_MARK_READ, &p, sizeof(p));
     t->history_scroll = 0;
+    if (changed) t->selected_message[0] = 0;
     report_active_conversation(t, true);
     t->dirty = true;
+    return true;
 }
 
-static void start_input(tui_ctx *t, tui_mode mode) { t->mode = mode; t->input[0] = 0; t->input_len = 0; t->dirty = true; }
+static void start_input(tui_ctx *t, tui_mode mode) {
+    save_composer(t);
+    t->mode = mode;
+    qtc_strlcpy(t->input, mode == MODE_COMPOSE ? t->draft : "", sizeof(t->input));
+    t->input_len = strlen(t->input); t->mention_active = false; t->dirty = true;
+}
 static void append_input(tui_ctx *t, char c) {
     if (t->input_len + 1 < sizeof(t->input)) { t->input[t->input_len++] = c; t->input[t->input_len] = 0; t->dirty = true; }
 }
@@ -534,7 +566,11 @@ static void backspace_input(tui_ctx *t) {
 }
 
 static void send_composed(tui_ctx *t) {
-    qtc_trim(t->input); if (t->input[0] == 0) { t->mode = MODE_NORMAL; return; }
+    qtc_trim(t->input);
+    if (t->input[0] == 0) {
+        t->draft[0] = 0; t->input_len = 0; t->replying = false;
+        t->mention_active = false; t->mode = MODE_NORMAL; t->dirty = true; return;
+    }
     if (t->open_kind == QTC_CONV_CONTACT) {
         qtc_ipc_send_direct_payload p = {0}; qtc_strlcpy(p.contact_id, t->open_key, sizeof(p.contact_id)); qtc_strlcpy(p.text, t->input, sizeof(p.text));
         (void)qtc_ipc_send(t->fd, QTC_IPC_SEND_DIRECT, &p, sizeof(p));
@@ -543,6 +579,64 @@ static void send_composed(tui_ctx *t) {
         (void)qtc_ipc_send(t->fd, QTC_IPC_SEND_CHANNEL, &p, sizeof(p));
     }
     t->mode = MODE_NORMAL; t->input[0] = 0; t->input_len = 0; t->dirty = true;
+    t->draft[0] = 0; t->replying = false; t->mention_active = false;
+}
+
+static bool display_sender(tui_ctx *t, const qtc_message *m, char *out, size_t cap) {
+    if (m->direction == QTC_MSG_OUTGOING) return false;
+    if (m->conversation_kind == QTC_CONV_CHANNEL) {
+        if (m->part_total > 1 && m->part_index != 1) {
+            const qtc_message *first = NULL;
+            for (size_t i = 0; i < t->state.message_count; i++)
+                if (t->state.messages[i].part_index == 1 && m->logical_key[0] &&
+                    strcmp(t->state.messages[i].logical_key, m->logical_key) == 0)
+                    first = &t->state.messages[i];
+            if (!first) return false;
+            m = first;
+        }
+        return qtc_channel_sender(m->text, out, cap);
+    }
+    qtc_contact *ct = find_contact(t, m->conversation_key);
+    if (!ct || !qtc_mention_name_valid(contact_name(ct))) return false;
+    qtc_strlcpy(out, contact_name(ct), cap);
+    return true;
+}
+
+#define MENTION_CANDIDATES 64
+static void add_mention(tui_ctx *t, char names[][QTC_MAX_NAME], size_t *count, const char *name) {
+    if (*count >= MENTION_CANDIDATES || !qtc_mention_name_valid(name) ||
+        !qtc_search_match(t->input + t->mention_start + 1, name)) return;
+    for (size_t i = 0; i < *count; i++) if (strcmp(names[i], name) == 0) return;
+    qtc_strlcpy(names[(*count)++], name, QTC_MAX_NAME);
+}
+
+static size_t mention_candidates(tui_ctx *t, char names[][QTC_MAX_NAME]) {
+    size_t count = 0;
+    for (size_t i = t->state.message_count; i > 0; i--) {
+        const qtc_message *m = &t->state.messages[i - 1];
+        char sender[QTC_MAX_NAME];
+        if (m->conversation_kind == t->open_kind && strcmp(m->conversation_key, t->open_key) == 0 &&
+            display_sender(t, m, sender, sizeof(sender))) add_mention(t, names, &count, sender);
+    }
+    if (t->open_kind == QTC_CONV_CONTACT) {
+        qtc_contact *ct = find_contact(t, t->open_key);
+        if (ct) add_mention(t, names, &count, contact_name(ct));
+    }
+    for (size_t i = 0; i < t->state.contact_count; i++)
+        if (t->state.contacts[i].node_type == QTC_NODE_PERSON)
+            add_mention(t, names, &count, contact_name(&t->state.contacts[i]));
+    return count;
+}
+
+static void accept_mention(tui_ctx *t) {
+    char names[MENTION_CANDIDATES][QTC_MAX_NAME], prefix[QTC_MAX_NAME + 4];
+    size_t count = mention_candidates(t, names);
+    if (!count) return;
+    if (t->mention_cursor >= count) t->mention_cursor = count - 1;
+    if (qtc_mention_prefix(names[t->mention_cursor], prefix, sizeof(prefix)) != 0 ||
+        t->mention_start + strlen(prefix) >= sizeof(t->input)) return;
+    strcpy(t->input + t->mention_start, prefix);
+    t->input_len = strlen(t->input); t->mention_active = false; t->dirty = true;
 }
 
 static size_t person_list(tui_ctx *t, int *indices, size_t max) {
@@ -709,17 +803,21 @@ static void handle_enter(tui_ctx *t) {
         t->mode = MODE_NORMAL; t->confirm_action = false; t->dirty = true; return;
     }
     if (t->view == VIEW_MESSAGES) {
-        open_selected(t);
+        if (!open_selected(t)) return;
         if (t->open_key[0]) start_input(t, MODE_COMPOSE);
     }
     else if (t->view == VIEW_CHANNELS && t->selected_channel >= 0) {
-        t->open_kind = QTC_CONV_CHANNEL; snprintf(t->open_key, sizeof(t->open_key), "%d", t->selected_channel);
-        t->selected_kind = 1; qtc_strlcpy(t->selected_key, t->open_key, sizeof(t->selected_key));
-        set_view(t, VIEW_MESSAGES); open_selected(t); start_input(t, MODE_COMPOSE);
+        t->selected_kind = 1; snprintf(t->selected_key, sizeof(t->selected_key), "%d", t->selected_channel);
+        set_view(t, VIEW_MESSAGES);
+        if (open_selected(t)) start_input(t, MODE_COMPOSE);
     }
 }
 
 static void escape_mode(tui_ctx *t) {
+    if (t->mode == MODE_COMPOSE) {
+        qtc_strlcpy(t->draft, t->replying ? t->reply_backup : t->input, sizeof(t->draft));
+        t->replying = false; t->mention_active = false;
+    }
     if (t->mode == MODE_SEARCH) t->search[0] = 0;
     if (t->mode != MODE_NORMAL) { t->mode = MODE_NORMAL; t->confirm_action = false; t->dirty = true; return; }
     if (t->view != VIEW_MESSAGES) set_view(t, VIEW_MESSAGES);
@@ -765,11 +863,37 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         else { t->last_ctrl_q = now; qtc_strlcpy(t->status, "Press Ctrl+Q again to stop the background core", sizeof(t->status)); t->dirty = true; }
         return;
     }
+    if (t->mode == MODE_COMPOSE && t->mention_active) {
+        if (c == 27) { t->mention_active = false; t->dirty = true; return; }
+        if (c == '\r' || c == '\n') { accept_mention(t); return; }
+    }
+    if (t->view == VIEW_MESSAGES && t->open_key[0] && c == '\t' &&
+        (t->mode == MODE_NORMAL || t->mode == MODE_COMPOSE || t->mode == MODE_MESSAGE_SELECT)) {
+        save_composer(t);
+        t->mode = t->mode == MODE_MESSAGE_SELECT ? MODE_NORMAL : MODE_MESSAGE_SELECT;
+        t->dirty = true; return;
+    }
+    if (t->mode == MODE_MESSAGE_SELECT) {
+        if (c == 'j') move_message(t, 1);
+        else if (c == 'k') move_message(t, -1);
+        else if (c == 'r') reply_message(t);
+        else if (c == 'm') start_input(t, MODE_COMPOSE);
+        else if (c == 27) escape_mode(t);
+        return;
+    }
     if (t->mode == MODE_SEARCH || t->mode == MODE_COMPOSE ||
         t->mode == MODE_CREATE_CHANNEL || t->mode == MODE_JOIN_CHANNEL ||
         t->mode == MODE_ALIAS || t->mode == MODE_FAVORITE_GROUP ||
         t->mode == MODE_DEVICE_NAME || t->mode == MODE_TX_POWER) {
+        bool trigger = t->mode == MODE_COMPOSE && !t->mention_active && c == '@' &&
+                       (!t->input_len || t->input[t->input_len - 1] == ' ');
+        size_t at = t->input_len;
         if (c == 127 || c == 8) backspace_input(t); else if (c == '\r' || c == '\n') handle_enter(t); else if (c == 27) escape_mode(t); else if (c >= 32) append_input(t, (char)c);
+        if (trigger && t->input_len > at) { t->mention_active = true; t->mention_start = at; }
+        if (t->mention_active) {
+            t->mention_cursor = 0;
+            if (t->input_len <= t->mention_start || c == '[') t->mention_active = false;
+        }
         if (t->mode == MODE_SEARCH) qtc_strlcpy(t->search, t->input, sizeof(t->search));
         return;
     }
@@ -897,6 +1021,22 @@ static void normal_key(tui_ctx *t, unsigned char c) {
 }
 
 static void special_key(tui_ctx *t, const char *seq) {
+    if (t->mode == MODE_COMPOSE && t->mention_active) {
+        if (strcmp(seq, "\x1b[A") == 0 || strcmp(seq, "\x1b[B") == 0) {
+            char names[MENTION_CANDIDATES][QTC_MAX_NAME];
+            size_t count = mention_candidates(t, names);
+            if (strcmp(seq, "\x1b[A") == 0 && t->mention_cursor) t->mention_cursor--;
+            else if (strcmp(seq, "\x1b[B") == 0 && t->mention_cursor + 1 < count) t->mention_cursor++;
+            t->dirty = true; return;
+        }
+        t->mention_active = false;
+    }
+    if (t->mode == MODE_MESSAGE_SELECT) {
+        if (strcmp(seq, "\x1b[A") == 0) { move_message(t, -1); return; }
+        if (strcmp(seq, "\x1b[B") == 0) { move_message(t, 1); return; }
+        if (strcmp(seq, "\x1b[5~") == 0) { move_message(t, -5); return; }
+        if (strcmp(seq, "\x1b[6~") == 0) { move_message(t, 5); return; }
+    }
     if (strcmp(seq, "\x1b[A") == 0) {
         if (t->mode == MODE_INVITE_PICKER) move_invite_cursor(t, -1);
         else if (t->mode == MODE_THEME_PICKER) { if (t->theme_cursor > 0) t->theme_cursor--; t->dirty = true; }
@@ -1287,6 +1427,48 @@ static size_t collect_logical_messages(tui_ctx *t, size_t *indices, size_t max) 
     return count;
 }
 
+static void move_message(tui_ctx *t, int delta) {
+    size_t indices[QTC_MAX_MESSAGES];
+    size_t count = collect_logical_messages(t, indices, QTC_ARRAY_LEN(indices));
+    if (!count) { t->selected_message[0] = 0; t->dirty = true; return; }
+    size_t pos = 0;
+    while (pos < count && strcmp(message_logical_key(&t->state.messages[indices[pos]]), t->selected_message)) pos++;
+    if (pos == count) pos = count - 1;
+    int next = (int)pos + delta;
+    if (next < 0) next = 0;
+    if ((size_t)next >= count) next = (int)count - 1;
+    qtc_strlcpy(t->selected_message, message_logical_key(&t->state.messages[indices[next]]), sizeof(t->selected_message));
+    t->dirty = true;
+}
+
+static void reply_message(tui_ctx *t) {
+    size_t indices[QTC_MAX_MESSAGES];
+    size_t count = collect_logical_messages(t, indices, QTC_ARRAY_LEN(indices));
+    char sender[QTC_MAX_NAME], prefix[QTC_MAX_NAME + 4];
+    for (size_t i = 0; i < count; i++) {
+        const qtc_message *m = &t->state.messages[indices[i]];
+        if (strcmp(message_logical_key(m), t->selected_message)) continue;
+        if (!display_sender(t, m, sender, sizeof(sender)) ||
+            qtc_mention_prefix(sender, prefix, sizeof(prefix)) != 0) break;
+        size_t prefix_len = strlen(prefix), draft_len = strlen(t->draft);
+        if (prefix_len + draft_len >= sizeof(t->input)) {
+            qtc_strlcpy(t->status, "Not enough room for reply mention; draft unchanged", sizeof(t->status));
+            t->dirty = true; return;
+        }
+        qtc_strlcpy(t->reply_backup, t->draft, sizeof(t->reply_backup));
+        start_input(t, MODE_COMPOSE);
+        /* Build outside tui_ctx so fortified copies cannot alias its fields. */
+        char reply[QTC_MAX_TEXT];
+        memcpy(reply, prefix, prefix_len);
+        memcpy(reply + prefix_len, t->draft, draft_len + 1);
+        memcpy(t->input, reply, prefix_len + draft_len + 1);
+        t->input_len = prefix_len + draft_len; t->replying = true;
+        return;
+    }
+    qtc_strlcpy(t->status, "Reply unavailable: select an incoming message with a known sender", sizeof(t->status));
+    t->dirty = true;
+}
+
 static void load_logical_message(tui_ctx *t, size_t index, logical_message_view *view) {
     memset(view, 0, sizeof(*view));
     view->first = &t->state.messages[index];
@@ -1364,6 +1546,32 @@ static int wrapped_line_count(const char *text, int width) {
     return lines > 0 ? lines : 1;
 }
 
+static void screen_put_mentioned(screen *s, int row, int col, int width,
+                                 const char *segment, const char *text, size_t offset, ui_style style) {
+    screen_put_text(s, row, col, width, segment, style);
+    while (text[offset] == ' ') offset++;
+    size_t length = strlen(segment);
+    for (size_t i = 0; text[i]; ) {
+        size_t n = qtc_mention_length(text + i);
+        if (!n) { i++; continue; }
+        size_t begin = i > offset ? i : offset;
+        size_t end = i + n < offset + length ? i + n : offset + length;
+        if (begin < end) {
+            char prefix[QTC_MAX_TEXT];
+            size_t a = begin - offset, b = end - offset;
+            memcpy(prefix, segment, a); prefix[a] = 0;
+            int left = text_width(prefix);
+            memcpy(prefix, segment, b); prefix[b] = 0;
+            int right = text_width(prefix);
+            for (int c = left; c < right && c < width; c++) {
+                screen_cell *cell = screen_at(s, row, col + c);
+                if (cell) cell->style = UI_ACCENT;
+            }
+        }
+        i += n;
+    }
+}
+
 static void render_messages(tui_ctx *t, screen *s) {
     int split = t->width / 3;
     if (split < 30) split = 30;
@@ -1434,16 +1642,21 @@ static void render_messages(tui_ctx *t, screen *s) {
 
     int first_message_row = 5;
     int message_rows = footer_top - first_message_row;
-    size_t logical_indices[768];
+    size_t logical_indices[QTC_MAX_MESSAGES];
     size_t logical_count = collect_logical_messages(t, logical_indices,
                                                      QTC_ARRAY_LEN(logical_indices));
     int text_area = rw - 2;
     if (text_area < 12) text_area = 12;
     size_t total_lines = 0;
+    size_t starts[QTC_MAX_MESSAGES], heights[QTC_MAX_MESSAGES];
+    size_t selected = logical_count;
     for (size_t i = 0; i < logical_count; i++) {
         logical_message_view view;
         load_logical_message(t, logical_indices[i], &view);
-        total_lines += 1U + (size_t)wrapped_line_count(view.text, text_area);
+        starts[i] = total_lines;
+        heights[i] = 1U + (size_t)wrapped_line_count(view.text, text_area);
+        total_lines += heights[i];
+        if (strcmp(message_logical_key(view.first), t->selected_message) == 0) selected = i;
     }
     size_t max_scroll = total_lines > (size_t)message_rows ?
                         total_lines - (size_t)message_rows : 0;
@@ -1451,6 +1664,20 @@ static void render_messages(tui_ctx *t, screen *s) {
     size_t window_start = total_lines > (size_t)message_rows + t->history_scroll ?
                           total_lines - (size_t)message_rows - t->history_scroll : 0;
     size_t window_end = window_start + (size_t)message_rows;
+    if (t->mode == MODE_MESSAGE_SELECT && logical_count) {
+        if (selected == logical_count) {
+            selected = 0;
+            for (size_t i = 0; i < logical_count; i++) if (starts[i] < window_end) selected = i;
+            qtc_strlcpy(t->selected_message, message_logical_key(&t->state.messages[logical_indices[selected]]), sizeof(t->selected_message));
+        }
+        if (starts[selected] < window_start || heights[selected] > (size_t)message_rows)
+            window_start = starts[selected];
+        else if (starts[selected] + heights[selected] > window_end)
+            window_start = starts[selected] + heights[selected] - (size_t)message_rows;
+        if (window_start > max_scroll) window_start = max_scroll;
+        t->history_scroll = max_scroll - window_start;
+        window_end = window_start + (size_t)message_rows;
+    }
     size_t visual_line = 0;
     int draw_row = first_message_row;
     for (size_t i = 0; i < logical_count && draw_row < footer_top; i++) {
@@ -1482,6 +1709,7 @@ static void render_messages(tui_ctx *t, screen *s) {
         }
         if (visual_line >= window_start && visual_line < window_end && draw_row < footer_top) {
             ui_style meta_style = view.status == QTC_MSG_FAILED ? UI_DANGER : UI_MUTED;
+            if (t->mode == MODE_MESSAGE_SELECT && i == selected) meta_style = UI_SELECTED;
             screen_put_text(s, draw_row++, right, rw, meta, meta_style);
         }
         visual_line++;
@@ -1495,7 +1723,9 @@ static void render_messages(tui_ctx *t, screen *s) {
                                   sizeof(segment), &next);
             if (visual_line >= window_start && visual_line < window_end && draw_row < footer_top) {
                 ui_style style = m->direction == QTC_MSG_OUTGOING ? UI_OUTGOING : UI_INCOMING;
-                screen_put_text(s, draw_row++, right + 2, text_area, segment, style);
+                if (t->mode == MODE_MESSAGE_SELECT && i == selected)
+                    screen_put_text(s, draw_row, right, 1, ">", UI_SELECTED);
+                screen_put_mentioned(s, draw_row++, right + 2, text_area, segment, view.text, offset, style);
             }
             visual_line++;
             if (next <= offset) break;
@@ -1515,7 +1745,12 @@ static void render_messages(tui_ctx *t, screen *s) {
         screen_put_fmt(s, footer_top, 1, t->width - 3, UI_UNREAD,
                        "NEW  %s: %s", t->banner_title, t->banner_body);
     else
-        screen_put_text(s, footer_top, 1, t->width - 3, "Enter Write  f Favorite  F2 Alias  g Group  F4 Settings  F5 Reconnect  F6 Channels  F7 Network  F8 Detach", UI_STATUS);
+        screen_put_text(s, footer_top, 1, t->width - 3,
+                        t->mode == MODE_MESSAGE_SELECT ? "Up/Down j/k Select  PgUp/PgDn Jump  r Reply  m Draft  Tab/Esc Roster" :
+                        t->mode == MODE_COMPOSE ? (t->replying ?
+                            "Enter Send  @ Mention  Tab Messages  Esc Cancel reply  F4 Settings  F8 Detach" :
+                            "Enter Send  @ Mention  Tab Messages  Esc Save draft  F4 Settings  F8 Detach") :
+                        "Enter Write  Tab Messages  f Fav  F2 Alias  g Group  F4 Settings  F5 Reconnect  F6 Channels  F7 Nodes  F8 Detach", UI_STATUS);
     screen_fill(s, t->height - 1, 0, t->width - 1, t->mode == MODE_SEARCH || t->mode == MODE_COMPOSE ? UI_INPUT : UI_NORMAL);
     if (t->mode == MODE_SEARCH) {
         screen_put_text(s, t->height - 1, 1, 8, "Search: ", UI_INPUT);
@@ -1535,6 +1770,21 @@ static void render_messages(tui_ctx *t, screen *s) {
                            "%s: %s", t->banner_title, t->banner_body);
         else
             screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
+    }
+    if (t->mode == MODE_COMPOSE && t->mention_active) {
+        char names[MENTION_CANDIDATES][QTC_MAX_NAME];
+        size_t count = mention_candidates(t, names);
+        if (count && t->mention_cursor >= count) t->mention_cursor = count - 1;
+        size_t first = t->mention_cursor >= 4 ? t->mention_cursor - 3 : 0;
+        int top = footer_top - 5;
+        screen_fill(s, top, right, rw, UI_SECTION);
+        screen_put_text(s, top, right, rw, "Mentions: Up/Down Enter accept Esc cancel", UI_SECTION);
+        for (size_t i = 0; i < 4; i++) {
+            ui_style style = first + i == t->mention_cursor ? UI_SELECTED : UI_NORMAL;
+            screen_fill(s, top + 1 + (int)i, right, rw, style);
+            if (first + i < count) screen_put_text(s, top + 1 + (int)i, right, rw, names[first + i], style);
+        }
+        if (!count) screen_put_text(s, top + 1, right, rw, "No matching names; Esc keeps typed text", UI_MUTED);
     }
 }
 
@@ -1844,7 +2094,8 @@ static void render(tui_ctx *t) {
         else if (t->view == VIEW_CHANNELS) render_channels(t, &s);
         else if (t->view == VIEW_NODES) render_nodes(t, &s);
         else render_settings(t, &s);
-        if (t->mode != MODE_NORMAL && t->mode != MODE_SEARCH && t->mode != MODE_COMPOSE) render_modal(t, &s);
+        if (t->mode != MODE_NORMAL && t->mode != MODE_SEARCH && t->mode != MODE_COMPOSE &&
+            t->mode != MODE_MESSAGE_SELECT) render_modal(t, &s);
     }
 
     /* Allow for cell bytes, style changes, and Unicode cursor re-anchors. */
