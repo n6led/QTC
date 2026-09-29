@@ -123,6 +123,14 @@ static void resume_outgoing_messages(core_ctx *c);
 static void disconnect_radio(core_ctx *c, const char *reason);
 static void schedule_background_sync(core_ctx *c, int64_t delay_ms);
 
+#define RADIO_RECONNECT_MS 3000
+
+static int64_t reconnect_clock(void) {
+    struct timespec now;
+    (void)clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
 static volatile sig_atomic_t g_stop;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
@@ -166,7 +174,7 @@ static int send_status_details(core_ctx *c, int fd) {
     d.uptime_seconds = now.tv_sec - c->started.tv_sec;
     if (now.tv_nsec < c->started.tv_nsec) d.uptime_seconds--;
     qtc_strlcpy(d.profile, c->paths.profile, sizeof(d.profile));
-    const char *session = "disconnected";
+    const char *session = "reconnecting";
     if (c->demo) session = "demo";
     else if (c->session_phase == RADIO_SESSION_READY) session = "ready";
     else if (c->session_phase == RADIO_SESSION_WAIT_APP_START) session = "waiting for app start";
@@ -755,6 +763,8 @@ static void service_radio_queue(core_ctx *c) {
                     c->pending_since = qtc_now_millis();
                     return;
                 }
+                disconnect_radio(c, "Radio write failed; reconnecting");
+                return;
             }
             char message_key[160];
             radio_purpose purpose = c->pending.purpose;
@@ -771,8 +781,9 @@ static void service_radio_queue(core_ctx *c) {
                 else
                     (void)update_message_state(c, message_key, QTC_MSG_UNCONFIRMED,
                                                c->pending.message_attempt, 0, 0, true);
-            } else if (advert_purpose(purpose)) {
-                advert_status(c, purpose, "timed out");
+            } else {
+                disconnect_radio(c, "Radio command timed out; reconnecting");
+                return;
             }
         } else {
             return;
@@ -790,29 +801,13 @@ static void service_radio_queue(core_ctx *c) {
         }
         break;
     } while (c->queue_count > 0);
+    /* A failed write may have transmitted a partial or complete command. */
+    c->radio_pending = true;
     if (qtc_serial_send(&c->serial, c->pending.data, c->pending.len) != 0) {
         qtc_log(QTC_LOG_WARN, "serial write failed: %s", strerror(errno));
-        char message_key[160];
-        radio_purpose purpose = c->pending.purpose;
-        qtc_strlcpy(message_key, c->pending.message_key, sizeof(message_key));
-        c->radio_pending = false;
-        if (purpose == RADIO_PURPOSE_STARTUP_APP ||
-            purpose == RADIO_PURPOSE_STARTUP_DEVICE) {
-            disconnect_radio(c, "MeshCore startup write failed; reconnecting");
-            return;
-        }
-        if (message_key[0]) {
-            if (purpose == RADIO_PURPOSE_DIRECT_SEND)
-                (void)retry_or_finish_message(c, message_key, false);
-            else
-                (void)update_message_state(c, message_key, QTC_MSG_UNCONFIRMED,
-                                           c->pending.message_attempt, 0, 0, true);
-        } else if (advert_purpose(purpose)) {
-            advert_status(c, purpose, "failed");
-        }
+        disconnect_radio(c, "Radio write failed; reconnecting");
         return;
     }
-    c->radio_pending = true;
     c->pending_since = qtc_now_millis();
     qtc_log(QTC_LOG_DEBUG, "radio TX cmd=0x%02x purpose=%d queue=%zu",
             c->pending.data[0], (int)c->pending.purpose, c->queue_count);
@@ -1180,24 +1175,29 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
 
 static void radio_frame_cb(const uint8_t *frame, size_t len, void *userdata) {
     core_ctx *c = userdata; qtc_radio_event e;
+    if (c->serial.fd < 0) return;
     if (qtc_protocol_parse(frame, len, &e) == 0) radio_event(c, &e);
     else qtc_log(QTC_LOG_WARN, "ignored malformed radio frame (%zu bytes)", len);
 }
 
 static int connect_radio(core_ctx *c) {
     if (c->demo) return 0;
+    c->reconnect_at = reconnect_clock() + RADIO_RECONNECT_MS;
     char device[QTC_MAX_PATH];
     if (c->requested_device[0]) qtc_strlcpy(device, c->requested_device, sizeof(device));
     else if (c->state.settings.serial_device[0]) qtc_strlcpy(device, c->state.settings.serial_device, sizeof(device));
     else if (qtc_serial_autodetect(device, sizeof(device)) != 0) {
         set_status(c, "No MeshCore serial device found; background core is waiting"); return -1;
     }
+    qtc_log(QTC_LOG_DEBUG, "Opening radio path: %s", device);
     if (qtc_serial_open(&c->serial, device, 115200) != 0) {
-        char msg[160]; snprintf(msg, sizeof(msg), "Cannot open %.96s: %.48s", device, strerror(errno)); set_status(c, msg); return -1;
+        char msg[160]; snprintf(msg, sizeof(msg), "Retrying USB in 3s: %.80s: %.48s", device, strerror(errno)); set_status(c, msg); return -1;
     }
     c->state.radio_connected = true; c->state.revisions.connection++;
-    qtc_strlcpy(c->state.settings.serial_device, device, sizeof(c->state.settings.serial_device));
-    (void)qtc_db_save_setting(&c->db, "serial_device", device);
+    if (strcmp(c->state.settings.serial_device, device) != 0) {
+        qtc_strlcpy(c->state.settings.serial_device, device, sizeof(c->state.settings.serial_device));
+        (void)qtc_db_save_setting(&c->db, "serial_device", device);
+    }
     c->queue_head = c->queue_count = 0;
     c->radio_pending = false;
     c->session_phase = RADIO_SESSION_DOWN;
@@ -1215,13 +1215,34 @@ static int connect_radio(core_ctx *c) {
 
 static void disconnect_radio(core_ctx *c, const char *reason) {
     if (c->serial.fd >= 0) qtc_serial_close(&c->serial);
+    /* Do not resume ambiguous transmissions, ACK timers, or queued fragments
+     * after USB loss. The user decides whether to send again. */
+    for (size_t i = 0; i < c->state.message_count; i++) {
+        qtc_message *m = &c->state.messages[i];
+        if (m->direction != QTC_MSG_OUTGOING) continue;
+        bool pending = c->radio_pending && strcmp(m->message_key, c->pending.message_key) == 0;
+        if (m->status == QTC_MSG_QUEUED || m->status == QTC_MSG_SENDING ||
+            (m->status == QTC_MSG_SENT && m->ack_deadline > 0)) {
+            qtc_message_status status = m->status == QTC_MSG_QUEUED && !pending ?
+                                        QTC_MSG_FAILED : QTC_MSG_UNCONFIRMED;
+            (void)update_message_state(c, m->message_key, status, m->attempt, 0, 0, true);
+        }
+    }
+    qtc_serial_parser_init(&c->serial.parser);
+    memset(&c->pending, 0, sizeof(c->pending));
+    c->pending_since = c->next_stored_poll = c->background_sync_after = 0;
+    c->state.radio_name[0] = c->state.radio_model[0] = c->state.radio_version[0] = 0;
+    c->state.radio_max_channels = 8; c->state.radio_max_contacts = QTC_MAX_CONTACTS;
+    c->state.radio_tx_power = c->state.radio_max_tx_power = 0;
+    c->state.radio_freq = c->state.radio_bw = 0;
+    c->state.radio_sf = c->state.radio_cr = 0;
     c->state.radio_connected = false; c->state.revisions.connection++; c->radio_pending = false;
     c->session_phase = RADIO_SESSION_DOWN;
     c->queue_head = c->queue_count = 0;
     c->inbox_empty_generation = c->inbox_generation;
     c->contacts_sync_needed = false;
     c->next_channel_sync = 0;
-    c->clipboard_client = -1; set_status(c, reason); c->reconnect_at = qtc_now_millis() + 3000;
+    c->clipboard_client = -1; set_status(c, reason); c->reconnect_at = reconnect_clock() + RADIO_RECONNECT_MS;
     broadcast_status(c);
 }
 
@@ -1239,6 +1260,7 @@ static int send_message_action(core_ctx *c, qtc_conversation_kind kind,
                                const char *conversation_key, const char *text) {
     if (conversation_key == NULL || *conversation_key == 0 || text == NULL || *text == 0)
         return -1;
+    if (!c->demo && c->session_phase != RADIO_SESSION_READY) return -1;
     size_t text_len = strlen(text);
     if (text_len >= QTC_MAX_TEXT) return -1;
 
@@ -1459,13 +1481,15 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
             if (f->length != sizeof(qtc_ipc_send_direct_payload) ||
                 send_direct_action(c, ((const qtc_ipc_send_direct_payload *)f->payload)->contact_id,
                                    ((const qtc_ipc_send_direct_payload *)f->payload)->text) != 0)
-                reply_error(c, "Could not send direct message");
+                reply_error(c, !c->demo && c->session_phase != RADIO_SESSION_READY ?
+                            "Radio unavailable; message not sent" : "Could not send direct message");
             break;
         case QTC_IPC_SEND_CHANNEL:
             if (f->length != sizeof(qtc_ipc_send_channel_payload) ||
                 send_channel_action(c, ((const qtc_ipc_send_channel_payload *)f->payload)->channel_index,
                                     ((const qtc_ipc_send_channel_payload *)f->payload)->text) != 0)
-                reply_error(c, "Could not send channel message");
+                reply_error(c, !c->demo && c->session_phase != RADIO_SESSION_READY ?
+                            "Radio unavailable; message not sent" : "Could not send channel message");
             break;
         case QTC_IPC_MARK_READ:
             if (f->length == sizeof(qtc_ipc_mark_read_payload)) {
@@ -1695,7 +1719,7 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
                 broadcast_status(c);
             } else {
                 disconnect_radio(c, "Manual USB reconnect requested");
-                c->reconnect_at = qtc_now_millis();
+                c->reconnect_at = reconnect_clock();
             }
             break;
         case QTC_IPC_DEVICE_SYNC_MESSAGES:
@@ -1859,13 +1883,11 @@ int qtc_core_run(const qtc_paths *paths, const char *device, bool demo, bool for
                                 disconnect_radio(&c, "Radio protocol parse failed; reconnecting");
                                 break;
                             }
+                            if (c.serial.fd < 0) break;
                             continue;
                         }
-                        /* VMIN=0 permits a zero-length read after the available
-                         * bytes have been drained; POLLHUP/POLLERR handles a
-                         * real disconnect. */
-                        if (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                            errno != EINTR) {
+                        if (got == 0 || (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                            errno != EINTR)) {
                             disconnect_radio(&c, "Radio read failed; reconnecting");
                         }
                         break;
@@ -1899,7 +1921,7 @@ int qtc_core_run(const qtc_paths *paths, const char *device, bool demo, bool for
             }
         }
         int64_t now = qtc_now_millis();
-        if (!c.demo && c.serial.fd < 0 && now >= c.reconnect_at) { c.reconnect_at = now + 3000; (void)connect_radio(&c); }
+        if (!c.demo && c.serial.fd < 0 && reconnect_clock() >= c.reconnect_at) (void)connect_radio(&c);
         if (!c.demo && c.state.radio_connected &&
             c.session_phase == RADIO_SESSION_READY &&
             now >= c.next_stored_poll) {

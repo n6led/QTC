@@ -62,7 +62,7 @@ def main():
                 assert fields["Database"] == str(Path(tmp) / "data/qtc-terminal/health/qtc.db")
                 assert fields["Mode"] == mode
                 assert fields["Radio"] == ("connected" if mode == "demo" else "disconnected")
-                assert fields["Session"] == ("demo" if mode == "demo" else "disconnected")
+                assert fields["Session"] == ("demo" if mode == "demo" else "reconnecting")
                 assert fields["Device"] == ("not applicable" if mode == "demo" else args[1])
                 assert int(fields["Uptime"][:-1]) >= 0 and fields["Uptime"].endswith("s")
                 time.sleep(1.1)
