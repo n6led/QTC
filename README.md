@@ -156,7 +156,7 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 | `Page Up` / `Page Down` | Scroll conversation history |
 | `Tab` | Focus logical messages in an open conversation; press again for roster |
 | `Up` / `Down`, `j` / `k` in message selection | Select previous/next logical message |
-| `r` in message selection | Reply with a sender mention; does not send |
+| `r` in message selection | Reply with sender mention and selected-message quote; does not send |
 | `F4` / `s` | Settings |
 | `F5` | Reconnect radio |
 | `F6` | Channels |
@@ -199,10 +199,20 @@ and resizing; if that message leaves the in-memory history, a visible message is
 selected instead. Tab or Escape returns to roster navigation. `m` resumes writing.
 
 Press `r` on an incoming message with a known sender to seed the composer with
-`@[Sender] `, including a trailing space. For example, a reply to MeshGarden BOT
-starts `@[MeshGarden BOT] `. Nothing is sent until you press Enter in the composer.
-No quotation or local message identifier is added. Outbound messages and unknown
-senders do not offer Reply; use `m` to write normally.
+`@[Sender] > selected message body | `, ready for your response. The quote comes
+from the exact selected logical message, assembling available multipart text and
+removing a recognized channel sender prefix. Nothing is sent until you press
+Enter in the composer. Outbound messages and unknown senders do not offer Reply;
+use `m` to write normally.
+
+Quotes collapse whitespace to single spaces and remove control characters;
+malformed UTF-8 becomes `?`. After reserving the mention and ASCII separators,
+the quote uses at most half the single-message text budget (160 bytes for direct
+messages, 120 for channels), leaving the rest for your response. Long quotes end
+in `...` and never split a UTF-8 character. Already-quoted messages are treated
+as ordinary text under the same budget, without parsing a reply tree. Existing
+drafts and subsequent edits may still use normal multipart sending; the composer
+limit remains 767 bytes. No hidden reply identifier is added.
 
 Direct replies use the known contact's display name (local alias if set). Channel
 replies recognize the conventional `Name: ` prefix, not arbitrary colon-separated
@@ -222,7 +232,7 @@ emoji are preserved; malformed UTF-8, control characters, and names containing
 including when wrapped, without altering stored text or notification behavior.
 
 A single draft is kept in memory for the open conversation. Escape from ordinary
-composition saves it; `m` resumes it. Reply prepends a mention to that draft rather
+composition saves it; `m` resumes it. Reply prepends a mention and quote to that draft rather
 than replacing it. Escape from reply composition restores the pre-reply draft;
 Tab or switching views keeps the edited reply as the draft. To prevent accidental
 loss, opening a different conversation is blocked while a draft exists: resume it,
