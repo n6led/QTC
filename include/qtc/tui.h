@@ -3,6 +3,7 @@
 
 #include "qtc/qtc.h"
 
-int qtc_tui_run(const qtc_paths *paths);
+int qtc_tui_theme_index(const char *name);
+int qtc_tui_run(const qtc_paths *paths, int theme_override);
 
 #endif

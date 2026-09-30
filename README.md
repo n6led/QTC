@@ -134,13 +134,37 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 - Contacts grouped by route distance, with infrastructure nodes separated from people.
 - Persistent background core: detach the terminal without disconnecting the radio.
 - Desktop notifications and notification sounds.
-- Four built-in terminal themes: Green Phosphor, Amber CRT, Midnight BBS, and Mono TTY.
+- A compact radio-console identity bar, active navigation labels and semantic terminal themes.
 - Wrapped message history with Page Up/Page Down navigation.
 - Radio controls for name, TX power, synchronization, reconnect, and advertisements.
 - Zero-hop and flood self advertisements with visible feedback.
 - Export your radio's MeshCore contact card to the clipboard.
 - First-connect regional radio presets.
 - Long UTF-8 messages are split and reassembled automatically between QTC clients.
+
+## Appearance and keyboard help
+
+The default for new profiles is `signal`. Select a theme for one TUI invocation:
+
+```sh
+qtc --theme signal
+qtc --theme amber
+qtc --theme phosphor
+qtc --theme high-contrast
+qtc --theme classic
+```
+
+`classic` keeps the original green QTC palette. The legacy `midnight` and `mono`
+palettes remain available, and existing saved choices retain their appearance.
+Use **F4**, then **t**, to apply and save a theme for the current profile; this
+replaces any temporary `--theme` override. The core/service needs no theme option.
+Themes use ordinary 16-color terminal styles, with text labels for radio state
+and a selection marker as well as color.
+
+Press **?** in navigation, message-selection or node-detail mode for keyboard
+help. **Esc** or **?** closes it; arrows, **j/k** and **PgUp/PgDn** scroll it.
+In the composer and other text inputs, `?` remains literal text. The existing
+68-column by 18-row minimum and keyboard workflow are unchanged.
 
 ## Main controls
 

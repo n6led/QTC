@@ -246,7 +246,7 @@ static void settings_defaults(qtc_settings *s) {
     s->retry_unconfirmed = true;
     s->max_direct_attempts = 3;
     s->reset_stale_route = true;
-    s->theme = 0;
+    s->theme = QTC_THEME_DEFAULT;
     s->tx_power = 0;
 }
 

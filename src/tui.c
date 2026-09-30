@@ -95,6 +95,13 @@ typedef struct {
     int64_t modal_enter_block_until;
     int64_t last_ctrl_q;
     int64_t incoming_invite_id;
+    bool help_open;
+    size_t help_scroll;
+    bool theme_overridden;
+    int theme_override;
+    bool demo;
+    bool session_ready;
+    char profile[64];
     int theme_cursor;
     int preset_cursor;
     char banner_title[QTC_MAX_NAME];
@@ -122,6 +129,7 @@ static const radio_preset RADIO_PRESETS[] = {
 static volatile sig_atomic_t g_resize;
 static void sigwinch_handler(int sig) { (void)sig; g_resize = 1; }
 static const char *theme_name(int index);
+static int theme_index(const tui_ctx *t);
 static void move_message(tui_ctx *t, int delta);
 static void reply_message(tui_ctx *t);
 
@@ -377,6 +385,16 @@ static void ipc_frame(const qtc_ipc_frame *f, void *userdata) {
         case QTC_IPC_STATUS:
             if (f->length == sizeof(qtc_ipc_status_payload)) {
                 const qtc_ipc_status_payload *s = (const void *)f->payload;
+                if (!s->radio_connected) t->session_ready = false;
+                else if (!t->state.radio_connected && !s->demo_mode && t->fd >= 0) {
+                    /* Existing optional status details also identify an already-ready
+                     * core on attach, without a radio query or a new IPC field. */
+                    uint8_t request = QTC_IPC_STATUS_DETAILS_VERSION;
+                    (void)qtc_ipc_send(t->fd, QTC_IPC_PING, &request, sizeof(request));
+                }
+                if (s->radio_connected && strcmp(s->message, "MeshCore session ready") == 0)
+                    t->session_ready = true;
+                t->demo = s->demo_mode;
                 t->state.radio_connected = s->radio_connected;
                 t->state.radio_max_channels = s->max_channels;
                 t->state.radio_max_contacts = s->max_contacts;
@@ -397,6 +415,13 @@ static void ipc_frame(const qtc_ipc_frame *f, void *userdata) {
                     if (level != FEEDBACK_INFO) t->advert_feedback_pending = false;
                 }
                 if (!t->loading) t->dirty = true;
+            }
+            break;
+        case QTC_IPC_STATUS_DETAILS:
+            if (f->length == sizeof(qtc_ipc_status_details)) {
+                const qtc_ipc_status_details *d = (const void *)f->payload;
+                t->session_ready = strcmp(d->session, "ready") == 0;
+                t->dirty = true;
             }
             break;
         case QTC_IPC_STATE_END: t->loading = false; t->dirty = true; break;
@@ -420,7 +445,7 @@ static void ipc_frame(const qtc_ipc_frame *f, void *userdata) {
             }
             break;
         case QTC_IPC_ERROR: {
-            const char *message = f->length ? (const char *)f->payload : "QTC core error";
+            const char *message = f->length ? (const char *)f->payload : QTC_DISPLAY_NAME " core error";
             qtc_strlcpy(t->status, message, sizeof(t->status));
             if (t->advert_feedback_pending) {
                 set_action_feedback(t, message, FEEDBACK_ERROR, 7000);
@@ -705,10 +730,11 @@ static void send_invites(tui_ctx *t) {
 static void save_settings(tui_ctx *t) { (void)qtc_ipc_send(t->fd, QTC_IPC_SETTINGS, &t->state.settings, sizeof(t->state.settings)); }
 
 static void cycle_theme(tui_ctx *t, int delta) {
-    int theme = t->state.settings.theme;
-    if (theme < 0 || theme > 3) theme = 0;
-    theme = (theme + delta) % 4;
-    if (theme < 0) theme += 4;
+    int theme = theme_index(t);
+    t->theme_overridden = false;
+    if (theme < 0 || theme >= QTC_THEME_COUNT) theme = QTC_THEME_DEFAULT;
+    theme = (theme + delta) % QTC_THEME_COUNT;
+    if (theme < 0) theme += QTC_THEME_COUNT;
     t->state.settings.theme = theme;
     save_settings(t);
     t->dirty = true;
@@ -829,10 +855,11 @@ static void handle_enter(tui_ctx *t) {
         t->mode = MODE_NORMAL; t->dirty = true; return;
     }
     if (t->mode == MODE_THEME_PICKER) {
+        t->theme_overridden = false;
         t->state.settings.theme = t->theme_cursor;
         save_settings(t);
         t->mode = MODE_NORMAL;
-        snprintf(t->status, sizeof(t->status), "Theme changed to %s", theme_name(t->state.settings.theme));
+        snprintf(t->status, sizeof(t->status), "Theme changed to %s", theme_name(theme_index(t)));
         t->dirty = true;
         return;
     }
@@ -912,12 +939,29 @@ static void first_pending_invite(tui_ctx *t) {
     qtc_strlcpy(t->status, "No pending private-channel invitations", sizeof(t->status)); t->dirty = true;
 }
 
+/* Help never consumes printable input from an editor or invite search. */
+static bool can_open_help(const tui_ctx *t) {
+    return t->mode == MODE_NORMAL || t->mode == MODE_MESSAGE_SELECT ||
+           t->mode == MODE_NODE_DETAIL;
+}
+
 static void normal_key(tui_ctx *t, unsigned char c) {
     if (c == 3) { leave_conversation(t); t->running = false; return; }
     if (c == 17) {
         int64_t now = qtc_now_millis();
         if (now - t->last_ctrl_q < 2000) { (void)qtc_ipc_send(t->fd, QTC_IPC_SHUTDOWN, NULL, 0); t->running = false; }
         else { t->last_ctrl_q = now; qtc_strlcpy(t->status, "Press Ctrl+Q again to stop the background core", sizeof(t->status)); t->dirty = true; }
+        return;
+    }
+    if (t->help_open) {
+        if (c == '?' || c == 27) t->help_open = false;
+        else if (c == 'j') t->help_scroll++;
+        else if (c == 'k' && t->help_scroll) t->help_scroll--;
+        t->dirty = true;
+        return;
+    }
+    if (c == '?' && can_open_help(t)) {
+        t->help_open = true; t->help_scroll = 0; t->dirty = true;
         return;
     }
     if (t->mode == MODE_NODE_DETAIL) {
@@ -976,7 +1020,7 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         return;
     }
     if (t->mode == MODE_THEME_PICKER || t->mode == MODE_PRESET_PICKER) {
-        int max = t->mode == MODE_THEME_PICKER ? 4 : (int)QTC_ARRAY_LEN(RADIO_PRESETS);
+        int max = t->mode == MODE_THEME_PICKER ? QTC_THEME_COUNT : (int)QTC_ARRAY_LEN(RADIO_PRESETS);
         int *cursor = t->mode == MODE_THEME_PICKER ? &t->theme_cursor : &t->preset_cursor;
         if (c == 'j') { if (*cursor + 1 < max) (*cursor)++; t->dirty = true; }
         else if (c == 'k') { if (*cursor > 0) (*cursor)--; t->dirty = true; }
@@ -1031,7 +1075,7 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         else if (c == '3') { t->state.settings.notify_direct = !t->state.settings.notify_direct; save_settings(t); t->dirty = true; }
         else if (c == '4') { t->state.settings.notify_channel = !t->state.settings.notify_channel; save_settings(t); t->dirty = true; }
         else if (c == '5') cycle_theme(t, 1);
-        else if (c == 't') { t->theme_cursor = t->state.settings.theme; t->mode = MODE_THEME_PICKER; t->dirty = true; }
+        else if (c == 't') { t->theme_cursor = theme_index(t); t->mode = MODE_THEME_PICKER; t->dirty = true; }
         else if (c == '6') { t->state.settings.banner_enabled = !t->state.settings.banner_enabled; save_settings(t); t->dirty = true; }
         else if (c == '7') { t->state.settings.suppress_open_conversation = !t->state.settings.suppress_open_conversation; save_settings(t); t->dirty = true; }
         else if (c == '8') { t->state.settings.retry_unconfirmed = !t->state.settings.retry_unconfirmed; save_settings(t); t->dirty = true; }
@@ -1062,7 +1106,7 @@ static void normal_key(tui_ctx *t, unsigned char c) {
                 t->advert_feedback_pending = true;
                 set_action_feedback(t, sending, FEEDBACK_INFO, 8000);
             } else {
-                const char *failed = "Could not send advertisement request to the QTC core";
+                const char *failed = "Could not send advertisement request to the " QTC_DISPLAY_NAME " core";
                 qtc_strlcpy(t->status, failed, sizeof(t->status));
                 t->advert_feedback_pending = false;
                 set_action_feedback(t, failed, FEEDBACK_ERROR, 7000);
@@ -1073,7 +1117,7 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         else if (c == 'y') (void)qtc_ipc_send(t->fd, QTC_IPC_DEVICE_SYNC_MESSAGES, NULL, 0);
         else if (c == 'r') (void)qtc_ipc_send(t->fd, QTC_IPC_DEVICE_RECONNECT, NULL, 0);
         else if (c == 'n') {
-            int rc = qtc_notify_desktop("QTC notification test", "Desktop notifications are working");
+            int rc = qtc_notify_desktop(QTC_DISPLAY_NAME " notification test", "Desktop notifications are working");
             qtc_strlcpy(t->status, rc == 0 ? "Desktop notification test sent" : "No desktop notification helper is available", sizeof(t->status));
             t->dirty = true;
         } else if (c == 'a') {
@@ -1085,6 +1129,15 @@ static void normal_key(tui_ctx *t, unsigned char c) {
 }
 
 static void special_key(tui_ctx *t, const char *seq) {
+    if (t->help_open && strcmp(seq, "\x1b[19~") != 0) {
+        if (strcmp(seq, "\x1b[B") == 0) t->help_scroll++;
+        else if (strcmp(seq, "\x1b[A") == 0 && t->help_scroll) t->help_scroll--;
+        else if (strcmp(seq, "\x1b[6~") == 0) t->help_scroll += 5;
+        else if (strcmp(seq, "\x1b[5~") == 0)
+            t->help_scroll = t->help_scroll > 5 ? t->help_scroll - 5 : 0;
+        t->dirty = true;
+        return;
+    }
     if (t->mode == MODE_NODE_DETAIL) {
         if (strcmp(seq, "\x1b[A") == 0) { scroll_node_detail(t, -1); return; }
         if (strcmp(seq, "\x1b[B") == 0) { scroll_node_detail(t, 1); return; }
@@ -1117,7 +1170,7 @@ static void special_key(tui_ctx *t, const char *seq) {
         else if (t->view == VIEW_NODES) move_nodes(t, -1);
     } else if (strcmp(seq, "\x1b[B") == 0) {
         if (t->mode == MODE_INVITE_PICKER) move_invite_cursor(t, 1);
-        else if (t->mode == MODE_THEME_PICKER) { if (t->theme_cursor < 3) t->theme_cursor++; t->dirty = true; }
+        else if (t->mode == MODE_THEME_PICKER) { if (t->theme_cursor + 1 < QTC_THEME_COUNT) t->theme_cursor++; t->dirty = true; }
         else if (t->mode == MODE_PRESET_PICKER) { if ((size_t)(t->preset_cursor + 1) < QTC_ARRAY_LEN(RADIO_PRESETS)) t->preset_cursor++; t->dirty = true; }
         else if (t->view == VIEW_MESSAGES) move_menu(t, 1);
         else if (t->view == VIEW_CHANNELS) move_channels(t, 1);
@@ -1193,6 +1246,9 @@ typedef enum {
     UI_ACCENT,
     UI_DANGER,
     UI_SUCCESS,
+    UI_READY,
+    UI_RECONNECTING,
+    UI_NAVIGATION,
     UI_STYLE_COUNT
 } ui_style;
 
@@ -1201,47 +1257,149 @@ typedef struct {
     const char *sgr[UI_STYLE_COUNT];
 } ui_theme;
 
-static const ui_theme THEMES[4] = {
-    {
-        .name = "Green Phosphor",
-        .sgr = {
-            "\x1b[0;32;40m", "\x1b[1;30;42m", "\x1b[0;32;40m",
-            "\x1b[1;92;40m", "\x1b[2;32;40m", "\x1b[1;30;102m",
-            "\x1b[1;97;40m", "\x1b[1;92;40m", "\x1b[0;32;40m",
-            "\x1b[0;30;42m", "\x1b[1;97;40m", "\x1b[1;92;40m",
-            "\x1b[1;91;40m", "\x1b[1;92;40m"
-        }
-    },
-    {
-        .name = "Amber CRT",
-        .sgr = {
-            "\x1b[0;33;40m", "\x1b[1;30;43m", "\x1b[0;33;40m",
-            "\x1b[1;93;40m", "\x1b[2;33;40m", "\x1b[1;30;103m",
-            "\x1b[1;97;40m", "\x1b[1;93;40m", "\x1b[0;33;40m",
-            "\x1b[0;30;43m", "\x1b[1;97;40m", "\x1b[1;93;40m",
-            "\x1b[1;91;40m", "\x1b[1;93;40m"
-        }
-    },
-    {
-        .name = "Midnight BBS",
-        .sgr = {
-            "\x1b[0;97;44m", "\x1b[1;97;45m", "\x1b[0;96;44m",
-            "\x1b[1;96;44m", "\x1b[2;37;44m", "\x1b[1;30;106m",
-            "\x1b[1;93;44m", "\x1b[1;96;44m", "\x1b[0;97;44m",
-            "\x1b[1;97;45m", "\x1b[1;93;44m", "\x1b[1;96;44m",
-            "\x1b[1;91;44m", "\x1b[1;92;44m"
-        }
-    },
-    {
-        .name = "Mono TTY",
-        .sgr = {
-            "\x1b[0m", "\x1b[7m", "\x1b[2m", "\x1b[1m",
-            "\x1b[2m", "\x1b[7m", "\x1b[1m", "\x1b[1m",
-            "\x1b[0m", "\x1b[7m", "\x1b[1m", "\x1b[1m",
-            "\x1b[1;4m", "\x1b[1m"
-        }
-    }
+/* Semantic SGR palettes; IDs 0..3 retain existing saved preferences. */
+static const ui_theme THEMES[QTC_THEME_COUNT] = {
+    {.name = "classic", .sgr = {
+        [UI_NORMAL] = "\x1b[0;32;40m",
+        [UI_HEADER] = "\x1b[0;30;42m",
+        [UI_BORDER] = "\x1b[0;32;40m",
+        [UI_SECTION] = "\x1b[1;92;40m",
+        [UI_MUTED] = "\x1b[2;32;40m",
+        [UI_SELECTED] = "\x1b[0;30;102m",
+        [UI_UNREAD] = "\x1b[1;97;40m",
+        [UI_OUTGOING] = "\x1b[1;92;40m",
+        [UI_INCOMING] = "\x1b[0;32;40m",
+        [UI_STATUS] = "\x1b[0;30;42m",
+        [UI_INPUT] = "\x1b[1;97;40m",
+        [UI_ACCENT] = "\x1b[0;4;92;40m",
+        [UI_DANGER] = "\x1b[0;97;41m",
+        [UI_SUCCESS] = "\x1b[1;92;40m",
+        [UI_READY] = "\x1b[1;92;40m",
+        [UI_RECONNECTING] = "\x1b[0;93;40m",
+        [UI_NAVIGATION] = "\x1b[0;30;102m",
+    }},
+    {.name = "amber", .sgr = {
+        [UI_NORMAL] = "\x1b[0;33;40m",
+        [UI_HEADER] = "\x1b[0;30;43m",
+        [UI_BORDER] = "\x1b[0;33;40m",
+        [UI_SECTION] = "\x1b[1;93;40m",
+        [UI_MUTED] = "\x1b[2;33;40m",
+        [UI_SELECTED] = "\x1b[0;30;103m",
+        [UI_UNREAD] = "\x1b[1;97;40m",
+        [UI_OUTGOING] = "\x1b[1;93;40m",
+        [UI_INCOMING] = "\x1b[0;33;40m",
+        [UI_STATUS] = "\x1b[0;30;43m",
+        [UI_INPUT] = "\x1b[1;97;40m",
+        [UI_ACCENT] = "\x1b[0;4;93;40m",
+        [UI_DANGER] = "\x1b[0;97;41m",
+        [UI_SUCCESS] = "\x1b[1;93;40m",
+        [UI_READY] = "\x1b[1;93;40m",
+        [UI_RECONNECTING] = "\x1b[0;93;40m",
+        [UI_NAVIGATION] = "\x1b[0;30;103m",
+    }},
+    {.name = "midnight", .sgr = {
+        [UI_NORMAL] = "\x1b[0;97;44m",
+        [UI_HEADER] = "\x1b[1;97;45m",
+        [UI_BORDER] = "\x1b[0;96;44m",
+        [UI_SECTION] = "\x1b[1;96;44m",
+        [UI_MUTED] = "\x1b[2;37;44m",
+        [UI_SELECTED] = "\x1b[0;30;106m",
+        [UI_UNREAD] = "\x1b[1;93;44m",
+        [UI_OUTGOING] = "\x1b[1;96;44m",
+        [UI_INCOMING] = "\x1b[0;97;44m",
+        [UI_STATUS] = "\x1b[1;97;45m",
+        [UI_INPUT] = "\x1b[1;93;44m",
+        [UI_ACCENT] = "\x1b[0;4;93;40m",
+        [UI_DANGER] = "\x1b[0;97;41m",
+        [UI_SUCCESS] = "\x1b[1;92;44m",
+        [UI_READY] = "\x1b[1;92;44m",
+        [UI_RECONNECTING] = "\x1b[0;93;40m",
+        [UI_NAVIGATION] = "\x1b[0;30;106m",
+    }},
+    {.name = "mono", .sgr = {
+        [UI_NORMAL] = "\x1b[0m",
+        [UI_HEADER] = "\x1b[0;7m",
+        [UI_BORDER] = "\x1b[0;2m",
+        [UI_SECTION] = "\x1b[0;1m",
+        [UI_MUTED] = "\x1b[0;2m",
+        [UI_SELECTED] = "\x1b[0;7m",
+        [UI_UNREAD] = "\x1b[0;1m",
+        [UI_OUTGOING] = "\x1b[0;1m",
+        [UI_INCOMING] = "\x1b[0m",
+        [UI_STATUS] = "\x1b[0;7m",
+        [UI_INPUT] = "\x1b[0;1m",
+        [UI_ACCENT] = "\x1b[0;1;4m",
+        [UI_DANGER] = "\x1b[0;1;4m",
+        [UI_SUCCESS] = "\x1b[0;1m",
+        [UI_READY] = "\x1b[0;1m",
+        [UI_RECONNECTING] = "\x1b[0;1;4m",
+        [UI_NAVIGATION] = "\x1b[0;4;7m",
+    }},
+    {.name = "signal", .sgr = {
+        [UI_NORMAL] = "\x1b[0;37;40m",
+        [UI_HEADER] = "\x1b[1;97;44m",
+        [UI_BORDER] = "\x1b[0;36;40m",
+        [UI_SECTION] = "\x1b[1;96;40m",
+        [UI_MUTED] = "\x1b[0;37;40m",
+        [UI_SELECTED] = "\x1b[0;30;106m",
+        [UI_UNREAD] = "\x1b[1;93;40m",
+        [UI_OUTGOING] = "\x1b[0;96;40m",
+        [UI_INCOMING] = "\x1b[0;37;40m",
+        [UI_STATUS] = "\x1b[0;97;44m",
+        [UI_INPUT] = "\x1b[1;97;40m",
+        [UI_ACCENT] = "\x1b[1;4;93;40m",
+        [UI_DANGER] = "\x1b[0;97;41m",
+        [UI_SUCCESS] = "\x1b[1;92;40m",
+        [UI_READY] = "\x1b[1;92;40m",
+        [UI_RECONNECTING] = "\x1b[0;93;40m",
+        [UI_NAVIGATION] = "\x1b[0;30;106m",
+    }},
+    {.name = "phosphor", .sgr = {
+        [UI_NORMAL] = "\x1b[0;32;40m",
+        [UI_HEADER] = "\x1b[0;30;42m",
+        [UI_BORDER] = "\x1b[0;32;40m",
+        [UI_SECTION] = "\x1b[1;92;40m",
+        [UI_MUTED] = "\x1b[2;32;40m",
+        [UI_SELECTED] = "\x1b[0;30;102m",
+        [UI_UNREAD] = "\x1b[1;4;92;40m",
+        [UI_OUTGOING] = "\x1b[1;92;40m",
+        [UI_INCOMING] = "\x1b[0;32;40m",
+        [UI_STATUS] = "\x1b[0;30;42m",
+        [UI_INPUT] = "\x1b[1;97;40m",
+        [UI_ACCENT] = "\x1b[1;4;92;40m",
+        [UI_DANGER] = "\x1b[0;97;41m",
+        [UI_SUCCESS] = "\x1b[1;92;40m",
+        [UI_READY] = "\x1b[1;92;40m",
+        [UI_RECONNECTING] = "\x1b[0;93;40m",
+        [UI_NAVIGATION] = "\x1b[0;30;102m",
+    }},
+    {.name = "high-contrast", .sgr = {
+        [UI_NORMAL] = "\x1b[0;97;40m",
+        [UI_HEADER] = "\x1b[0;30;107m",
+        [UI_BORDER] = "\x1b[0;97;40m",
+        [UI_SECTION] = "\x1b[1;97;40m",
+        [UI_MUTED] = "\x1b[0;97;40m",
+        [UI_SELECTED] = "\x1b[0;30;107m",
+        [UI_UNREAD] = "\x1b[1;4;97;40m",
+        [UI_OUTGOING] = "\x1b[1;97;40m",
+        [UI_INCOMING] = "\x1b[0;97;40m",
+        [UI_STATUS] = "\x1b[0;30;107m",
+        [UI_INPUT] = "\x1b[1;97;40m",
+        [UI_ACCENT] = "\x1b[1;4;97;40m",
+        [UI_DANGER] = "\x1b[0;30;107m",
+        [UI_SUCCESS] = "\x1b[1;97;40m",
+        [UI_READY] = "\x1b[1;97;40m",
+        [UI_RECONNECTING] = "\x1b[0;30;107m",
+        [UI_NAVIGATION] = "\x1b[0;4;30;107m",
+    }},
 };
+
+int qtc_tui_theme_index(const char *name) {
+    if (name == NULL) return -1;
+    for (int i = 0; i < QTC_THEME_COUNT; i++)
+        if (strcmp(name, THEMES[i].name) == 0) return i;
+    return -1;
+}
 
 typedef struct {
     char bytes[12];
@@ -1260,14 +1418,17 @@ typedef struct {
     bool cursor;
 } screen;
 
+static int theme_index(const tui_ctx *t) {
+    int index = t->theme_overridden ? t->theme_override : t->state.settings.theme;
+    return index >= 0 && index < QTC_THEME_COUNT ? index : QTC_THEME_DEFAULT;
+}
+
 static const ui_theme *active_theme(const tui_ctx *t) {
-    int index = t->state.settings.theme;
-    if (index < 0 || index >= (int)QTC_ARRAY_LEN(THEMES)) index = 0;
-    return &THEMES[index];
+    return &THEMES[theme_index(t)];
 }
 
 static const char *theme_name(int index) {
-    if (index < 0 || index >= (int)QTC_ARRAY_LEN(THEMES)) index = 0;
+    if (index < 0 || index >= (int)QTC_ARRAY_LEN(THEMES)) index = QTC_THEME_DEFAULT;
     return THEMES[index].name;
 }
 
@@ -1869,11 +2030,11 @@ static void render_messages(tui_ctx *t, screen *s) {
                        "NEW  %s: %s", t->banner_title, t->banner_body);
     else
         screen_put_text(s, footer_top, 1, t->width - 3,
-                        t->mode == MODE_MESSAGE_SELECT ? "Up/Down j/k Select  PgUp/PgDn Jump  r Reply  m Draft  Tab/Esc Roster" :
+                        t->mode == MODE_MESSAGE_SELECT ? "r Reply  m Draft  Tab/Esc Roster  Up/Down Select  ? Help" :
                         t->mode == MODE_COMPOSE ? (t->replying ?
                             "Enter Send  @ Mention  Tab Messages  Esc Cancel reply  F4 Settings  F8 Detach" :
                             "Enter Send  @ Mention  Tab Messages  Esc Save draft  F4 Settings  F8 Detach") :
-                        "Enter Write  Tab Messages  f Fav  F2 Alias  g Group  F4 Settings  F5 Reconnect  F6 Channels  F7 Nodes  F8 Detach", UI_STATUS);
+                        "Enter Write  Tab Messages  F4 Settings  F8 Detach  ? Help", UI_STATUS);
     screen_fill(s, t->height - 1, 0, t->width - 1, t->mode == MODE_SEARCH || t->mode == MODE_COMPOSE ? UI_INPUT : UI_NORMAL);
     if (t->mode == MODE_SEARCH) {
         screen_put_text(s, t->height - 1, 1, 8, "Search: ", UI_INPUT);
@@ -1902,7 +2063,7 @@ static void render_messages(tui_ctx *t, screen *s) {
         int top = footer_top - 5;
         screen_fill(s, top, right, rw, UI_SECTION);
         screen_put_text(s, top, right, rw, "Mentions: Up/Down Enter accept Esc cancel", UI_SECTION);
-        for (size_t i = 0; i < 4; i++) {
+        for (size_t i = 0; i < QTC_THEME_COUNT; i++) {
             ui_style style = first + i == t->mention_cursor ? UI_SELECTED : UI_NORMAL;
             screen_fill(s, top + 1 + (int)i, right, rw, style);
             if (first + i < count) screen_put_text(s, top + 1 + (int)i, right, rw, names[first + i], style);
@@ -1949,7 +2110,7 @@ static void render_channels(tui_ctx *t, screen *s) {
     size_t pending = pending_invites(t);
     if (pending > 0) screen_put_fmt(s, row + 1, 5, t->width - 10, UI_UNREAD, "%zu pending private-channel invitation%s - press v to review", pending, pending == 1 ? "" : "s");
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
-    screen_put_text(s, t->height - 2, 1, t->width - 3, "c Create  j Join  i Invite  r Rotate  d Leave  n/p Select  Enter Write  v Pending  F6 Back", UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Enter Write  c Create  j Join  i Invite  F6 Back  ? Help", UI_STATUS);
     screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
 }
 
@@ -1988,7 +2149,7 @@ static void render_nodes(tui_ctx *t, screen *s) {
     }
     if (!n) screen_put_text(s, row, 5, t->width - 10, "No repeaters, rooms, sensors, or unknown nodes.", UI_MUTED);
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
-    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k Select  Enter Details  F7/Esc Back", UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k Select  Enter Details  F7/Esc Back  ? Help", UI_STATUS);
     screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
 }
 
@@ -2038,7 +2199,7 @@ static void render_node_detail(tui_ctx *t, screen *s) {
         } while (offset < strlen(fields[i]));
     }
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
-    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k PgUp/PgDn Scroll  Esc/F7 Back", UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Up/Down j/k PgUp/PgDn Scroll  Esc/F7 Back  ? Help", UI_STATUS);
     screen_put_fmt(s, t->height - 1, 1, t->width - 3, UI_MUTED, "Lines %zu-%zu of %zu", t->node_detail_scroll + 1,
                    t->node_detail_scroll + (lines < rows ? lines : rows), lines);
 }
@@ -2065,7 +2226,7 @@ static void render_settings(tui_ctx *t, screen *s) {
     setting_row(s, row++, "0", "Show SNR and path in history", onoff(t->state.settings.show_signal));
     if (row < t->height - 7) {
         screen_put_fmt(s, row++, 5, t->width - 10, UI_NORMAL,
-                       "Theme [t]: %s", theme_name(t->state.settings.theme));
+                       "Theme [t]: %s", theme_name(theme_index(t)));
         screen_put_text(s, row++, 5, t->width - 10,
                         "Themes: Green Phosphor | Amber CRT | Midnight BBS | Mono TTY", UI_MUTED);
         screen_put_fmt(s, row++, 5, t->width - 10, UI_NORMAL,
@@ -2096,7 +2257,7 @@ static void render_settings(tui_ctx *t, screen *s) {
     }
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
     screen_put_text(s, t->height - 2, 1, t->width - 3,
-                    "o First-connect preset  t Theme  d Name  p Power  z 0-hop advert  x Flood advert  c Copy card  y Sync  r/F5 Reconnect",
+                    "t Theme  5 Cycle  o Preset  r/F5 Reconnect  F4 Back  ? Help",
                     UI_STATUS);
     screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
 }
@@ -2129,7 +2290,7 @@ static void render_modal(tui_ctx *t, screen *s) {
     if (t->mode == MODE_CREATE_CHANNEL || t->mode == MODE_JOIN_CHANNEL) {
         const char *title = t->mode == MODE_CREATE_CHANNEL ? "CREATE PRIVATE CHANNEL" : "JOIN PRIVATE CHANNEL";
         screen_box(s, top, left, h, w, title);
-        screen_put_text(s, top + 2, left + 3, w - 6, t->mode == MODE_CREATE_CHANNEL ? "Channel name (QTC generates a secure key):" : "Invitation URI, raw 32-character key, or Name:key:", UI_NORMAL);
+        screen_put_text(s, top + 2, left + 3, w - 6, t->mode == MODE_CREATE_CHANNEL ? "Channel name (" QTC_DISPLAY_NAME " generates a secure key):" : "Invitation URI, raw 32-character key, or Name:key:", UI_NORMAL);
         screen_fill(s, top + 4, left + 3, w - 6, UI_INPUT);
         screen_put_text(s, top + 4, left + 4, 2, "> ", UI_INPUT);
         screen_put_text(s, top + 4, left + 6, w - 10, t->input, UI_INPUT);
@@ -2140,18 +2301,15 @@ static void render_modal(tui_ctx *t, screen *s) {
         return;
     }
     if (t->mode == MODE_THEME_PICKER) {
-        static const char *const themes[] = {
-            "Green Phosphor", "Amber CRT", "Midnight BBS", "Mono TTY"
-        };
-        h = 13;
+        h = QTC_THEME_COUNT + 5;
         top = (t->height - h) / 2;
         screen_box(s, top, left, h, w, "SELECT THEME");
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < QTC_THEME_COUNT; i++) {
             ui_style style = i == t->theme_cursor ? UI_SELECTED : UI_NORMAL;
-            screen_fill(s, top + 2 + i * 2, left + 3, w - 6, style);
-            screen_put_fmt(s, top + 2 + i * 2, left + 4, w - 8, style,
-                           "%d. %s%s", i + 1, themes[i],
-                           i == t->state.settings.theme ? "  [current]" : "");
+            screen_fill(s, top + 2 + i, left + 3, w - 6, style);
+            screen_put_fmt(s, top + 2 + i, left + 4, w - 8, style,
+                           "%d. %s%s", i + 1, theme_name(i),
+                           i == theme_index(t) ? "  [current]" : "");
         }
         screen_put_text(s, top + h - 2, left + 3, w - 6,
                         "Up/Down or j/k selects. Enter applies. Esc cancels.", UI_MUTED);
@@ -2260,23 +2418,143 @@ static void out_fmt(char *out, size_t cap, size_t *used, const char *fmt, ...) {
     *used += written;
 }
 
+static const char *radio_label(const tui_ctx *t) {
+    if (t->demo) return "DEMO";
+    if (t->loading) return "DISCONNECTED";
+    if (!t->state.radio_connected) return "RECONNECTING";
+    if (!t->session_ready) return "INITIALIZING";
+    return "RADIO READY";
+}
+
+static void render_shell(tui_ctx *t, screen *s) {
+    screen_fill(s, 0, 0, t->width - 1, UI_HEADER);
+    const char *label = radio_label(t);
+    int state_width = (int)strlen(label);
+    int state_col = t->width - state_width - 2;
+    screen_put_fmt(s, 0, 1, state_col - 2, UI_HEADER,
+                   QTC_DISPLAY_NAME " TERMINAL %s | %s", QTC_VERSION,
+                   t->state.radio_name[0] ? t->state.radio_name : t->profile);
+    screen_put_text(s, 0, state_col, state_width, label,
+                    t->demo || (t->state.radio_connected && t->session_ready) ?
+                    UI_READY : UI_RECONNECTING);
+    screen_fill(s, 1, 0, t->width - 1, UI_STATUS);
+    const char *tabs[] = {"MESSAGES", "F6 CHANNELS", "F7 NODES", "F4 SETTINGS"};
+    int col = 1;
+    for (int i = 0; i < 4; i++) {
+        screen_put_text(s, 1, col, (int)strlen(tabs[i]), tabs[i],
+                        t->view == (tui_view)i ? UI_NAVIGATION : UI_STATUS);
+        col += (int)strlen(tabs[i]) + 2;
+    }
+    if (can_open_help(t)) screen_put_text(s, 1, col, t->width - col - 2, "? Help", UI_STATUS);
+}
+
+static void render_help(tui_ctx *t, screen *s) {
+    /* NULL key: section heading; empty key and description: section spacer. */
+    static const struct { const char *key; const char *description; } lines[] = {
+        {NULL, "GLOBAL"},
+        {"?", "Open help outside text entry"},
+        {"Esc / ?", "Close help"},
+        {"F8 / Ctrl+C", "Detach"},
+        {"Ctrl+Q twice", "Stop background core"},
+        {"F4", "Settings"},
+        {"F5", "Reconnect radio"},
+        {"", ""},
+        {NULL, "CONVERSATIONS"},
+        {"Up/Down, j/k", "Select conversation"},
+        {"Enter", "Open and write"},
+        {"/", "Search"},
+        {"f", "Toggle favorite"},
+        {"F2 / e", "Edit alias"},
+        {"g", "Edit favorite group"},
+        {"", ""},
+        {NULL, "MESSAGE HISTORY"},
+        {"Tab", "Select messages / return to roster"},
+        {"Up/Down, j/k", "Select message"},
+        {"PgUp/PgDn", "Scroll history / jump selection"},
+        {"r", "Reply / quote selected message"},
+        {"m", "Compose draft"},
+        {"Esc", "Return to roster"},
+        {"", ""},
+        {NULL, "COMPOSER"},
+        {"Enter", "Send"},
+        {"Esc", "Save draft / cancel reply"},
+        {"Tab", "Select messages"},
+        {"@", "Mention autocomplete"},
+        {"Up/Down", "Select mention candidate"},
+        {"Enter / Esc", "Accept / cancel mention picker"},
+        {"?", "Type a literal question mark"},
+        {"", ""},
+        {NULL, "CHANNELS"},
+        {"F6", "Channels / back to messages"},
+        {"Up/Down, n/p", "Select channel"},
+        {"Enter", "Open and write"},
+        {"c / j", "Create / join"},
+        {"i", "Invite"},
+        {"r / d", "Rotate key / leave"},
+        {"v", "Review pending invitations"},
+        {"", ""},
+        {NULL, "NETWORK NODES"},
+        {"F7", "Nodes / back to messages"},
+        {"Up/Down, j/k", "Select node"},
+        {"Enter", "Open details"},
+        {"Esc", "Back to messages"},
+        {"", ""},
+        {NULL, "NODE DETAIL"},
+        {"Up/Down, j/k", "Scroll"},
+        {"PgUp/PgDn", "Page"},
+        {"Esc / F7", "Back to selected node"},
+        {"", ""},
+        {NULL, "SETTINGS"},
+        {"t / 5", "Theme picker / cycle theme"},
+        {"Up/Down, j/k", "Select in theme picker"},
+        {"Enter / Esc", "Apply / cancel picker"},
+        {"o", "Radio preset"},
+        {"d / p", "Radio name / power"},
+        {"c / y", "Copy card / sync messages"},
+        {"z / x", "Zero-hop / flood advertisement"},
+        {"r", "Reconnect"}
+    };
+    if (s->w < 20 || s->h < 10) return;
+    int h = s->h - 4, w = s->w > 90 ? 84 : s->w - 4;
+    int top = 2, left = (s->w - w) / 2;
+    int key_col = left + 2, description_col = key_col + 16;
+    size_t rows = (size_t)(h - 4), count = QTC_ARRAY_LEN(lines);
+    size_t max = count > rows ? count - rows : 0;
+    if (t->help_scroll > max) t->help_scroll = max;
+    /* The underlying page can have a wide cell crossing either box edge.
+     * Clear its whole footprint before the box fill erases continuation bits. */
+    for (int r = top; r < top + h; r++) {
+        screen_clear_footprint(s, r, left, UI_NORMAL);
+        screen_clear_footprint(s, r, left + w - 1, UI_NORMAL);
+    }
+    screen_box(s, top, left, h, w, QTC_DISPLAY_NAME " KEYBOARD HELP");
+    for (size_t i = 0; i < rows && i + t->help_scroll < count; i++) {
+        size_t n = i + t->help_scroll;
+        int row = top + 2 + (int)i;
+        if (lines[n].key == NULL)
+            screen_put_text(s, row, key_col, w - 4, lines[n].description, UI_SECTION);
+        else {
+            screen_put_text(s, row, key_col, 14, lines[n].key, UI_ACCENT);
+            screen_put_text(s, row, description_col, w - 20,
+                            lines[n].description, UI_NORMAL);
+        }
+    }
+    screen_put_text(s, top + h - 2, key_col, w - 4,
+                    "Up/Down j/k Scroll   PgUp/PgDn Page   Esc/? Close", UI_STATUS);
+    s->cursor = false;
+}
+
 static void render(tui_ctx *t) {
     update_size(t);
     screen s;
     if (screen_init(&s, t->width, t->height) != 0) return;
     const ui_theme *theme = active_theme(t);
 
-    screen_fill(&s, 0, 0, t->width - 1, UI_HEADER);
-    screen_put_fmt(&s, 0, 1, t->width - 3, UI_HEADER, "QTC TERMINAL %s", QTC_VERSION);
-    char connection[512];
-    snprintf(connection, sizeof(connection), "%s  %s", t->state.radio_connected ? "CONNECTED" : "OFFLINE", t->state.radio_name[0] ? t->state.radio_name : "MeshCore companion");
-    int connection_width = text_width(connection);
-    if (connection_width < t->width - 24) screen_put_text(&s, 0, t->width - connection_width - 2, connection_width, connection, UI_HEADER);
-    screen_hline(&s, 1, 0, t->width - 1, '=', UI_BORDER);
+    render_shell(t, &s);
 
     if (t->width < 68 || t->height < 18) {
         screen_put_fmt(&s, 4, 3, t->width - 6, UI_DANGER, "Terminal is too small: %dx%d", t->width, t->height);
-        screen_put_text(&s, 6, 3, t->width - 6, "QTC needs at least 68 columns by 18 rows.", UI_NORMAL);
+        screen_put_text(&s, 6, 3, t->width - 6, QTC_DISPLAY_NAME " needs at least 68 columns by 18 rows.", UI_NORMAL);
         screen_put_text(&s, 8, 3, t->width - 6, "Resize the terminal; the interface will redraw automatically.", UI_MUTED);
     } else {
         if (t->view == VIEW_MESSAGES) render_messages(t, &s);
@@ -2288,6 +2566,7 @@ static void render(tui_ctx *t) {
         else render_settings(t, &s);
         if (t->mode != MODE_NORMAL && t->mode != MODE_SEARCH && t->mode != MODE_COMPOSE &&
             t->mode != MODE_MESSAGE_SELECT && t->mode != MODE_NODE_DETAIL) render_modal(t, &s);
+        if (t->help_open) render_help(t, &s);
     }
 
     /* Allow for cell bytes, style changes, and Unicode cursor re-anchors. */
@@ -2330,28 +2609,32 @@ static void render(tui_ctx *t) {
     t->dirty = false;
 }
 
-int qtc_tui_run(const qtc_paths *paths) {
+int qtc_tui_run(const qtc_paths *paths, int theme_override) {
     (void)setlocale(LC_CTYPE, "");
     tui_ctx t;
     memset(&t, 0, sizeof(t));
+    t.theme_overridden = theme_override >= 0;
+    t.theme_override = theme_override;
+    t.state.settings.theme = QTC_THEME_DEFAULT;
+    qtc_strlcpy(t.profile, paths->profile, sizeof(t.profile));
     t.running = true;
     t.dirty = true;
     t.selected_channel = -1;
     t.fd = qtc_ipc_client_connect(paths->socket_path, 2000);
     if (t.fd < 0) {
-        fprintf(stderr, "Could not connect to QTC core: %s\n", strerror(errno));
+        fprintf(stderr, "Could not connect to " QTC_DISPLAY_NAME " core: %s\n", strerror(errno));
         return 1;
     }
     qtc_ipc_reader_init(&t.reader);
     if (verify_core_version(t.fd) != 0) {
         close(t.fd);
-        fprintf(stderr, "QTC background core is incompatible with QTC %s; restart QTC\n",
+        fprintf(stderr, QTC_DISPLAY_NAME " background core is incompatible with " QTC_DISPLAY_NAME " %s; restart " QTC_DISPLAY_NAME "\n",
                 QTC_VERSION);
         return 1;
     }
     if (set_raw_terminal(&t) != 0) {
         close(t.fd);
-        fprintf(stderr, "QTC requires an interactive terminal\n");
+        fprintf(stderr, QTC_DISPLAY_NAME " requires an interactive terminal\n");
         return 1;
     }
     signal(SIGWINCH, sigwinch_handler);

@@ -1454,7 +1454,7 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
                 if (updated.stored_poll_seconds > 3600) updated.stored_poll_seconds = 3600;
                 if (updated.max_direct_attempts < 1) updated.max_direct_attempts = 1;
                 if (updated.max_direct_attempts > 4) updated.max_direct_attempts = 4;
-                if (updated.theme < 0 || updated.theme > 3) updated.theme = 0;
+                if (updated.theme < 0 || updated.theme >= QTC_THEME_COUNT) updated.theme = QTC_THEME_DEFAULT;
                 const qtc_settings *s = &updated;
                 char value[32];
                 (void)qtc_db_save_setting(&c->db, "desktop_notifications", s->desktop_notifications ? "1" : "0");
