@@ -24,7 +24,7 @@ static void usage(FILE *out) {
     fprintf(out,
         "QTC Terminal %s - terminal messenger for MeshCore\n\n"
         "Usage:\n"
-        "  qtc [--profile NAME] [--device PATH] [--demo]\n"
+        "  qtc [--profile NAME] [--device PATH] [--demo] [--theme NAME]\n"
         "  qtc core [--profile NAME] [--device PATH] [--demo] [--foreground]\n"
         "  qtc status [--profile NAME]\n"
         "  qtc shutdown [--profile NAME]\n"
@@ -32,7 +32,8 @@ static void usage(FILE *out) {
         "  qtc --list-devices\n"
         "  qtc --print-udev-rule\n"
         "  qtc --version\n\n"
-        "TUI: F6 channels, F7 network nodes, F8/Ctrl+C detach, Ctrl+Q twice shutdown.\n",
+        "Themes: signal, amber, phosphor, high-contrast, classic (legacy: midnight, mono).\n"
+        "TUI: ? help, F6 channels, F7 network nodes, F8/Ctrl+C detach, Ctrl+Q twice shutdown.\n",
         QTC_VERSION);
 }
 
@@ -48,7 +49,7 @@ static bool has_arg(int argc, char **argv, const char *name) {
 }
 static int command_index(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--profile") == 0 || strcmp(argv[i], "--device") == 0) {
+        if (strcmp(argv[i], "--profile") == 0 || strcmp(argv[i], "--device") == 0 || strcmp(argv[i], "--theme") == 0) {
             if (i + 1 < argc) i++;
             continue;
         }
@@ -184,9 +185,17 @@ int main(int argc, char **argv) {
     if (command && strcmp(command, "test-sound") == 0) return qtc_notify_sound() == 0 ? 0 : 1;
     if (command != NULL) { usage(stderr); return 2; }
 
+    int theme = -1;
+    if (has_arg(argc, argv, "--theme")) {
+        theme = qtc_tui_theme_index(arg_value(argc, argv, "--theme"));
+        if (theme < 0) {
+            fprintf(stderr, "Invalid theme. Choose signal, amber, phosphor, high-contrast, classic, midnight or mono.\n");
+            return 2;
+        }
+    }
     char executable[PATH_MAX]; qtc_platform_self_path(executable, sizeof(executable), argv[0]);
     if (qtc_core_ensure_running(executable, &paths, device, demo) != 0) {
         fprintf(stderr, "Could not start QTC background core: %s\n", strerror(errno)); return 1;
     }
-    return qtc_tui_run(&paths);
+    return qtc_tui_run(&paths, theme);
 }

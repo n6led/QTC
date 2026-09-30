@@ -47,6 +47,7 @@ build/tests/%: tests/%.c $(LIB_OBJ) | build/tests
 
 build/tests/test_tui_mentions: tests/test_tui_mentions.c src/tui.c
 build/tests/test_tui_nodes: tests/test_tui_nodes.c src/tui.c
+build/tests/test_tui_themes: tests/test_tui_themes.c src/tui.c
 
 unit-test: $(TEST_BIN)
 	@set -e; for t in $(TEST_BIN); do echo "== $$t =="; "$$t"; done
@@ -56,6 +57,7 @@ integration-test: $(BIN)
 	QTC_BIN="$(abspath $(BIN))" python3 ./tests/status_test.py
 	QTC_BIN="$(abspath $(BIN))" python3 ./tests/tui_smoke_test.py
 	QTC_BIN="$(abspath $(BIN))" python3 ./tests/reconnect_test.py
+	QTC_BIN="$(abspath $(BIN))" python3 ./tests/themes_test.py
 	QTC_BIN="$(abspath $(BIN))" QTC_TIMING_SCALE=$(QTC_TIMING_SCALE) python3 ./tests/serial_latency_test.py
 
 test: unit-test integration-test

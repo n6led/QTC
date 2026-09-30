@@ -137,12 +137,12 @@ def main() -> None:
     output.extend(read_available(master, 0.4))
     settings = render_terminal(bytes(output))
     assert settings[2].strip() == "SETTINGS", settings[2]
-    assert "Green Phosphor" in "\n".join(settings)
+    assert "Theme [t]: signal" in "\n".join(settings)
 
     os.write(master, b"t2")  # visible theme picker, then Amber CRT
     output.extend(read_available(master, 0.5))
     amber = render_terminal(bytes(output))
-    assert "Theme [t]: Amber CRT" in "\n".join(amber)
+    assert "Theme [t]: amber" in "\n".join(amber)
 
     os.write(master, b"o1")  # first-connect Europe / UK preset
     output.extend(read_available(master, 0.5))
