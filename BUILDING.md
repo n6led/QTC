@@ -178,6 +178,13 @@ make test CC=clang
 
 ## Debug logging
 
+For headless Linux deployment, follow the [systemd user-service guide](README.md#start-at-boot-with-a-systemd-user-service-linux)
+and configure a stable `/dev/serial/by-id/...` path. The core waits when that
+path is absent and retries it every three seconds, including after USB unplug
+or reset. It reinitializes the Companion without restarting the core or choosing
+another device. Hardware unplug/replug validation remains necessary for your
+radio; `make test` covers recovery with simulated serial devices.
+
 Run QTC in demo mode with debug logging:
 
 ```sh

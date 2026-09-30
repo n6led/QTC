@@ -6,9 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static speed_t baud_flag(int baud) {
@@ -33,7 +35,7 @@ int qtc_serial_open(qtc_serial *s, const char *device, int baud) {
     cfmakeraw(&t); speed_t speed = baud_flag(baud);
     cfsetispeed(&t, speed); cfsetospeed(&t, speed);
     t.c_cflag |= CLOCAL | CREAD; t.c_cflag &= ~(CSTOPB | CRTSCTS); t.c_cflag &= ~PARENB;
-    t.c_cflag = (t.c_cflag & ~CSIZE) | CS8; t.c_cc[VMIN] = 0; t.c_cc[VTIME] = 0;
+    t.c_cflag = (t.c_cflag & ~CSIZE) | CS8; t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
     if (tcsetattr(fd, TCSANOW, &t) != 0) { close(fd); return -1; }
     tcflush(fd, TCIOFLUSH); s->fd = fd; qtc_strlcpy(s->device, device, sizeof(s->device));
     qtc_serial_parser_init(&s->parser); return 0;
@@ -41,7 +43,7 @@ int qtc_serial_open(qtc_serial *s, const char *device, int baud) {
 
 void qtc_serial_close(qtc_serial *s) {
     if (s != NULL && s->fd >= 0) {
-        (void)tcdrain(s->fd); if (s->original_valid) (void)tcsetattr(s->fd, TCSANOW, &s->original);
+        if (s->original_valid) (void)tcsetattr(s->fd, TCSANOW, &s->original);
         close(s->fd); s->fd = -1;
     }
 }
@@ -55,9 +57,26 @@ int qtc_serial_send(qtc_serial *s, const uint8_t *payload, size_t len) {
     uint8_t frame[QTC_MAX_FRAME + 3]; size_t n = 0;
     if (s == NULL || s->fd < 0 || qtc_protocol_wrap_command(payload, len, frame, sizeof(frame), &n) != 0) return -1;
     size_t off = 0;
+    struct timespec start, now;
+    (void)clock_gettime(CLOCK_MONOTONIC, &start);
     while (off < n) {
+        (void)clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t elapsed = (now.tv_sec - start.tv_sec) * 1000LL +
+                          (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed >= 250) { errno = ETIMEDOUT; return -1; }
         ssize_t w = write(s->fd, frame + off, n - off);
-        if (w < 0) { if (errno == EINTR) continue; if (errno == EAGAIN) { usleep(1000); continue; } return -1; }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd p = {.fd = s->fd, .events = POLLOUT};
+                int rc = poll(&p, 1, 250 - (int)elapsed);
+                if (rc < 0 && errno == EINTR) continue;
+                if (rc > 0 && !(p.revents & (POLLERR | POLLHUP | POLLNVAL))) continue;
+                if (rc >= 0) errno = rc == 0 ? ETIMEDOUT : EIO;
+            }
+            return -1;
+        }
+        if (w == 0) { errno = EIO; return -1; }
         off += (size_t)w;
     }
     return 0;

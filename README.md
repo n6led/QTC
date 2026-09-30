@@ -384,8 +384,16 @@ journalctl --user -u qtc.service -b
 ```
 
 `Restart=on-failure` and `RestartSec=5` retry process failures after five seconds.
-When USB is temporarily absent, the current core normally stays alive and retries
-the radio connection itself; systemd does not restart a still-running process.
+When USB is absent at startup or unplugged/reset later, the core stays alive and
+retries the configured device path every three seconds. It does not switch to
+another device. Use a stable `/dev/serial/by-id/...` path so the same Companion
+can return under a different tty number. Reopening runs the normal MeshCore
+handshake again; `qtc status` reports `Radio: disconnected` and
+`Session: reconnecting` while waiting, then `Session: ready` after initialization.
+The database, IPC and attached TUI remain available; systemd need not restart
+the process. Sends while offline are rejected. Queued messages are marked failed,
+and in-flight messages are marked unconfirmed rather than automatically resent;
+check before manually retrying to avoid duplicates.
 Neither mechanism fixes an incorrect device path or missing serial permissions.
 If systemd reports a start-limit failure, fix the cause, run
 `systemctl --user reset-failed qtc.service`, then restart it.
