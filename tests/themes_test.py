@@ -35,9 +35,9 @@ def main():
                     break
                 time.sleep(0.1)
             baseline = None
-            palettes = {"signal": b"\x1b[1;97;44m", "amber": b"\x1b[1;30;43m",
-                        "phosphor": b"\x1b[1;30;42m", "high-contrast": b"\x1b[1;30;107m",
-                        "classic": b"\x1b[1;30;42m"}
+            palettes = {"signal": b"\x1b[1;97;44m", "amber": b"\x1b[0;30;43m",
+                        "phosphor": b"\x1b[0;30;42m", "high-contrast": b"\x1b[0;30;107m",
+                        "classic": b"\x1b[0;30;42m"}
             for theme, sgr in palettes.items():
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 0, 0))

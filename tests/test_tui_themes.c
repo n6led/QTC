@@ -18,8 +18,86 @@ static bool contains(screen *s, const char *text) {
     return false;
 }
 
+static void test_help_borders(void) {
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    const int widths[] = {68, 80, 100};
+    const int heights[] = {18, 28};
+    const size_t scrolls[] = {0, 8, 25, 1000};
+    for (size_t wi = 0; wi < QTC_ARRAY_LEN(widths); wi++) {
+        for (size_t hi = 0; hi < QTC_ARRAY_LEN(heights); hi++) {
+            t->width = widths[wi]; t->height = heights[hi];
+            int w = t->width > 90 ? 84 : t->width - 4;
+            int left = (t->width - w) / 2, right = left + w - 1;
+            int top = 2, h = t->height - 4;
+            for (size_t si = 0; si < QTC_ARRAY_LEN(scrolls); si++) {
+                screen s; ASSERT_EQ_INT(screen_init(&s, t->width, t->height), 0);
+                /* Reproduce a chat glyph straddling the help box near its bottom.
+                 * A raw box fill alone leaves the outside lead cell alive. */
+                int row = top + h - 4;
+                screen_put_text(&s, row, left - 1, 2, "📡", UI_INCOMING);
+                screen_put_text(&s, row, right, 2, "界", UI_INCOMING);
+                ASSERT_TRUE(screen_at(&s, row, left)->continuation);
+                t->help_scroll = scrolls[si];
+                render_help(t, &s);
+                ASSERT_EQ_INT(screen_at(&s, row, left - 1)->width, 1);
+                ASSERT_EQ_INT(screen_at(&s, row, right + 1)->continuation, 0);
+                for (int r = top + 1; r < top + h - 1; r++) {
+                    ASSERT_EQ_INT(screen_at(&s, r, left)->bytes[0], '|');
+                    ASSERT_EQ_INT(screen_at(&s, r, right)->bytes[0], '|');
+                    ASSERT_EQ_INT(screen_at(&s, r, left)->style, UI_BORDER);
+                    ASSERT_EQ_INT(screen_at(&s, r, right)->style, UI_BORDER);
+                    /* Model sequential emission/cursor re-anchor positions, not fonts. */
+                    int cursor = 0;
+                    for (int c = 0; c <= right; c++) {
+                        screen_cell *cell = screen_at(&s, r, c);
+                        if (cell->continuation) continue;
+                        if (c == left || c == right) ASSERT_EQ_INT(cursor, c);
+                        cursor += cell->width;
+                        if (cell->len > 1 || cell->width > 1) cursor = c + cell->width;
+                    }
+                }
+                if (!scrolls[si]) {
+                    ASSERT_EQ_INT(screen_at(&s, top + 2, left + 2)->style, UI_SECTION);
+                    for (int r = top + 3; r < top + 8; r++) {
+                        ASSERT_EQ_INT(screen_at(&s, r, left + 2)->style, UI_ACCENT);
+                        ASSERT_EQ_INT(screen_at(&s, r, left + 18)->style, UI_NORMAL);
+                        ASSERT_TRUE(screen_at(&s, r, left + 18)->bytes[0] != ' ');
+                    }
+                }
+                screen_free(&s);
+            }
+        }
+    }
+    free(t);
+}
+
+static void test_highlight_contrast(void) {
+    const ui_style styles[] = {UI_SELECTED, UI_NAVIGATION};
+    for (int i = 0; i < QTC_THEME_COUNT; i++) {
+        const ui_theme *theme = &THEMES[i];
+        for (size_t j = 0; j < QTC_ARRAY_LEN(styles); j++) {
+            const char *sgr = theme->sgr[styles[j]];
+            /* Reset attributes first: bold-black must not become bright gray.
+             * Explicit black on bright backgrounds, or reset terminal reverse. */
+            ASSERT_TRUE(strncmp(sgr, "\x1b[0;", 4) == 0);
+            ASSERT_TRUE(strstr(sgr, ";7m") != NULL ||
+                        strstr(sgr, ";30;10") != NULL);
+        }
+        ASSERT_TRUE(strcmp(theme->sgr[UI_NAVIGATION], theme->sgr[UI_STATUS]) != 0);
+        ASSERT_TRUE(strcmp(theme->sgr[UI_ACCENT], theme->sgr[UI_NORMAL]) != 0);
+        ASSERT_TRUE(strstr(theme->sgr[UI_ACCENT], ";4;") != NULL ||
+                    strstr(theme->sgr[UI_ACCENT], ";4m") != NULL);
+        ASSERT_TRUE(strcmp(theme->sgr[UI_INPUT], theme->sgr[UI_NORMAL]) != 0);
+        ASSERT_TRUE(strstr(theme->sgr[UI_RECONNECTING], ";33;") == NULL);
+    }
+    const ui_theme *high = &THEMES[qtc_tui_theme_index("high-contrast")];
+    ASSERT_STREQ(high->sgr[UI_SELECTED], "\x1b[0;30;107m");
+}
+
 int main(void) {
     (void)setlocale(LC_CTYPE, "");
+    test_help_borders();
+    test_highlight_contrast();
     tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
     t->fd = -1;
     qtc_db db;
