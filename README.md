@@ -63,16 +63,17 @@ ls -l /dev/ttyACM0
 and add your user to that group instead.
 
 Connect the MeshCore device before starting QTC. QTC should run as your normal user; sudo is not normally required.
-On x86-64 Linux, download `qtc-linux-x86_64` from the [latest GitHub release](https://github.com/initsixdev/QTC/releases/latest), then:
+
+On ARM64 Linux (`uname -m` reports `aarch64`), a prebuilt ARM64 archive is available from the [latest GitHub release](https://github.com/n6led/QTC/releases/latest). Extract it, then install the included binary as `qtc`:
 
 ```sh
-chmod +x qtc-linux-x86_64
-sudo install -m 0755 qtc-linux-x86_64 /usr/local/bin/qtc
+tar -xzf qtc-terminal-*-linux-aarch64.tar.gz
+cd qtc-terminal-*-linux-aarch64
+sudo install -m 0755 qtc-linux-aarch64 /usr/local/bin/qtc
 qtc
 ```
 
-On ARM64 Linux (`uname -m` reports `aarch64`), build natively from source.
-From the source directory on Debian or Ubuntu, including Debian 13 on Raspberry Pi 4:
+On x86-64 Linux, currently build from source. From the source directory on Debian or Ubuntu:
 
 ```sh
 sudo apt install build-essential libsqlite3-dev python3
@@ -82,8 +83,9 @@ sudo make install
 qtc
 ```
 
-This produces `build/qtc-linux-aarch64`. See [BUILDING.md](BUILDING.md) for
-the reported ARM64 hardware validation and packaging instructions.
+Source builds are also supported on ARM64. A native ARM64 build produces
+`build/qtc-linux-aarch64`. See [BUILDING.md](BUILDING.md) for detailed build,
+validation, and packaging instructions.
 
 ### macOS
 
