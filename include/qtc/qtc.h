@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <sqlite3.h>
 
-#define QTC_VERSION "1.2.0"
+#define QTC_VERSION "1.3.0"
 #define QTC_DISPLAY_NAME "QTC"
 /* Preserve the four existing persisted palette IDs. */
 #define QTC_THEME_COUNT 7

@@ -7,7 +7,7 @@ static void cb(const uint8_t *f, size_t n, void *u) { capture *c=u; c->calls++; 
 static void put32(uint8_t *p, uint32_t v) { p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24; }
 int main(void) {
     uint8_t cmd[256], wrapped[300]; size_t n, wn;
-    n = qtc_cmd_app_start(cmd, sizeof(cmd), "QTC Terminal 1.2.0");
+    n = qtc_cmd_app_start(cmd, sizeof(cmd), "QTC Terminal 1.3.0");
     ASSERT_TRUE(n > 8); ASSERT_EQ_INT(cmd[0],1); ASSERT_EQ_INT(cmd[1],3);
     n = qtc_cmd_device_query(cmd, sizeof(cmd)); ASSERT_EQ_INT(n,2); ASSERT_EQ_INT(cmd[0],0x16); ASSERT_EQ_INT(cmd[1],3);
     uint8_t prefix[6]={1,2,3,4,5,6}; n=qtc_cmd_send_direct(cmd,sizeof(cmd),prefix,1234,2,"hi");
