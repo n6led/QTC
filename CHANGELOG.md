@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.3.0
+
+### Added / Improved
+
+- Reply with `r` to quote the exact selected logical message, assembling multipart
+  messages first and keeping normalized, UTF-8-safe quotes bounded for your response.
+- Recover automatically from USB Companion loss or an absent device at startup,
+  retrying every three seconds and reinitializing the MeshCore session while the
+  core, database, IPC and attached TUI remain available. Offline sends are rejected;
+  ambiguous in-flight messages are not automatically replayed.
+- Refresh the TUI identity/status bar, active navigation and context-sensitive hints.
+- Add temporary `--theme` selection for signal, amber, phosphor, high-contrast,
+  classic, midnight and mono, with saved per-profile selection through F4 -> t.
+- Add scrollable `?` keyboard help outside text entry, closed with Esc or `?`.
+
+### Fixed
+
+- Mention autocomplete cancellation no longer leaves a bare `@` trigger in drafts;
+  Tab no longer falls through to message selection while suggestions are active.
+- Keep help-overlay borders aligned when underlying wide characters cross an edge.
+- Improve selection/navigation contrast and help readability across built-in themes.
+
+### Compatibility / Notes
+
+- Quoted replies remain ordinary readable MeshCore text, without proprietary reply
+  metadata or hidden identifiers.
+- USB recovery retries the exact configured device path; stable
+  `/dev/serial/by-id/...` paths remain recommended.
+- Existing profiles retain their saved theme preferences; `signal` is the default
+  for new profiles and `classic` preserves the traditional green QTC palette.
+
 ## v1.2.0
 
 ### Added / Improved
