@@ -24,57 +24,56 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     int peer;
     core_ctx *c = ready_core(&peer);
-    int fd = c->serial.fd;
-    expire(c, 10, RADIO_PURPOSE_GENERIC, 0);
-    ASSERT_EQ_INT(c->serial.fd, fd); ASSERT_TRUE(c->state.radio_connected);
-    ASSERT_EQ_INT(c->session_phase, RADIO_SESSION_READY);
-    ASSERT_TRUE(!c->radio_pending); ASSERT_EQ_INT(c->pending.len, 0);
-    ASSERT_EQ_INT(c->pending_since, 0); ASSERT_EQ_INT(c->reconnect_at, 0);
-    ASSERT_TRUE(strstr(c->last_status, "session remains ready") != NULL);
-    ASSERT_EQ_INT(c->command_timeout_failures, 1);
-
-    /* An unrelated recognized response is health evidence, not just matched OK. */
-    uint8_t unknown[] = {255}, malformed[] = {18}, valid[] = {0};
-    radio_frame_cb(unknown, sizeof(unknown), c);
-    radio_frame_cb(malformed, sizeof(malformed), c);
-    ASSERT_EQ_INT(c->command_timeout_failures, 1);
-    radio_frame_cb(valid, sizeof(valid), c);
-    ASSERT_EQ_INT(c->command_timeout_failures, 0);
-    uint8_t cmd[] = {31, 0}, wire[8];
-    ASSERT_EQ_INT(queue_radio_ex(c, cmd, sizeof(cmd), QTC_RADIO_CHANNEL_INFO,
+    uint8_t wire[8], cmd[] = {31, 0};
+    request_inbox_drain(c, true);
+    queue_next_inbox_message(c, RADIO_PRIORITY_INBOX);
+    service_radio_queue(c);
+    ASSERT_EQ_INT(read(peer, wire, sizeof(wire)), 4);
+    ASSERT_EQ_INT(radio_command_timeout_ms(&c->pending), 1500);
+    ASSERT_EQ_INT(radio_command_transport_retries(&c->pending), 0);
+    ASSERT_EQ_INT(queue_radio_ex(c, cmd, sizeof(cmd), QTC_RADIO_OK,
                                 QTC_RADIO_ERROR, QTC_RADIO_UNKNOWN, "",
                                 RADIO_PURPOSE_GENERIC, 0, RADIO_PRIORITY_NORMAL), 0);
+    /* Past the old deadline, retain ownership and do not transmit the queue. */
+    c->pending_since = qtc_now_millis() - 650;
     service_radio_queue(c);
-    ASSERT_TRUE(c->radio_pending);
+    ASSERT_TRUE(c->radio_pending); ASSERT_EQ_INT(c->pending.data[0], 10);
+    ASSERT_EQ_INT(c->queue_count, 1);
+    struct pollfd check = {.fd = peer, .events = POLLIN};
+    ASSERT_EQ_INT(poll(&check, 1, 0), 0);
+    /* An empty reply for an older generation must not erase a newer push. */
+    request_inbox_drain(c, true);
+    qtc_radio_event empty = {.type = QTC_RADIO_NO_MORE_MESSAGES};
+    radio_event(c, &empty);
+    ASSERT_EQ_INT(c->inbox_empty_generation, 1);
+    ASSERT_TRUE(inbox_needs_drain(c));
+    ASSERT_EQ_INT(c->pending.data[0], 10);
+    ASSERT_EQ_INT(read(peer, wire, sizeof(wire)), 4);
+    radio_event(c, &empty);
+    ASSERT_TRUE(!inbox_needs_drain(c));
+    ASSERT_EQ_INT(c->pending.data[0], 31);
     ASSERT_EQ_INT(read(peer, wire, sizeof(wire)), 5);
-    qtc_radio_event channel = {.type = QTC_RADIO_CHANNEL_INFO};
-    /* Use OK for a completion without requiring the database fixture. */
-    c->pending.expected_a = QTC_RADIO_OK; channel.type = QTC_RADIO_OK;
-    radio_event(c, &channel);
-    ASSERT_TRUE(!c->radio_pending); ASSERT_EQ_INT(c->serial.fd, fd);
+    /* An unsolicited late empty cannot complete an unrelated command. */
+    radio_event(c, &empty);
+    ASSERT_TRUE(c->radio_pending); ASSERT_EQ_INT(c->pending.data[0], 31);
+    qtc_radio_event ok = {.type = QTC_RADIO_OK};
+    radio_event(c, &ok);
+    ASSERT_TRUE(!c->radio_pending);
+    expire(c, 10, RADIO_PURPOSE_GENERIC, 0);
+    ASSERT_EQ_INT(c->serial.fd, -1);
+    ASSERT_EQ_INT(c->session_phase, RADIO_SESSION_DOWN);
+    ASSERT_TRUE(!c->state.radio_connected && !c->radio_pending);
+    ASSERT_EQ_INT(c->queue_count, 0); ASSERT_EQ_INT(c->pending.len, 0);
+    ASSERT_TRUE(!inbox_needs_drain(c));
+    ASSERT_TRUE(strstr(c->last_status, "reconnecting") != NULL);
+    close(peer); free(c);
 
-    /* A generic transport retry is not an exhausted command. */
+    c = ready_core(&peer);
     expire(c, 31, RADIO_PURPOSE_GENERIC, 0);
     ASSERT_TRUE(c->radio_pending); ASSERT_EQ_INT(c->pending.transport_attempts, 1);
-    ASSERT_EQ_INT(c->command_timeout_failures, 0);
     ASSERT_EQ_INT(read(peer, wire, sizeof(wire)), 4);
     expire(c, 31, RADIO_PURPOSE_GENERIC, 1);
-    ASSERT_EQ_INT(c->command_timeout_failures, 1);
-    c->clipboard_client = 0;
-    expire(c, 17, RADIO_PURPOSE_EXPORT_SELF, 0);
-    ASSERT_EQ_INT(c->clipboard_client, -1); ASSERT_EQ_INT(c->serial.fd, fd);
-    ASSERT_EQ_INT(c->command_timeout_failures, 2);
-    radio_frame_cb(valid, sizeof(valid), c);
-    ASSERT_EQ_INT(c->command_timeout_failures, 0);
-    expire(c, 7, RADIO_PURPOSE_ADVERT_ZERO_HOP, 0);
-    ASSERT_TRUE(strstr(c->last_status, "timed out") != NULL);
-    ASSERT_EQ_INT(c->serial.fd, fd);
-    expire(c, 10, RADIO_PURPOSE_GENERIC, 0);
-    ASSERT_EQ_INT(c->serial.fd, fd);
-    expire(c, 10, RADIO_PURPOSE_GENERIC, 0);
-    ASSERT_EQ_INT(c->serial.fd, -1); ASSERT_EQ_INT(c->session_phase, RADIO_SESSION_DOWN);
-    ASSERT_EQ_INT(c->command_timeout_failures, 0);
-    ASSERT_TRUE(strstr(c->last_status, "Repeated") != NULL);
+    ASSERT_EQ_INT(c->session_phase, RADIO_SESSION_DOWN);
     close(peer); free(c);
 
     const radio_purpose startup[] = {RADIO_PURPOSE_STARTUP_APP, RADIO_PURPOSE_STARTUP_DEVICE};
@@ -82,7 +81,7 @@ int main(void) {
         c = ready_core(&peer);
         c->session_phase = i ? RADIO_SESSION_WAIT_DEVICE_INFO : RADIO_SESSION_WAIT_APP_START;
         expire(c, i ? 22 : 1, startup[i], 0);
-        ASSERT_TRUE(c->serial.fd >= 0); ASSERT_EQ_INT(c->command_timeout_failures, 0);
+        ASSERT_TRUE(c->serial.fd >= 0);
         ASSERT_EQ_INT(read(peer, wire, sizeof(wire)), 4);
         expire(c, i ? 22 : 1, startup[i], 1);
         ASSERT_EQ_INT(c->serial.fd, -1);
