@@ -31,6 +31,9 @@
 #define RADIO_CONTACTS_TIMEOUT_MS 5000
 #define INBOX_FALLBACK_POLL_MS 500
 #define BACKGROUND_SYNC_DELAY_MS 1500
+/* Count exhausted commands, not their transport retries. Three failures with
+ * no recognized RX tolerate an isolated loss but recover a silent Companion. */
+#define RADIO_TIMEOUT_FAILURE_LIMIT 3
 
 typedef enum {
     RADIO_PURPOSE_GENERIC = 0,
@@ -112,6 +115,7 @@ typedef struct {
     radio_session_phase session_phase;
     radio_command pending;
     int64_t pending_since;
+    unsigned command_timeout_failures;
     char last_status[160];
 } core_ctx;
 
@@ -782,8 +786,23 @@ static void service_radio_queue(core_ctx *c) {
                     (void)update_message_state(c, message_key, QTC_MSG_UNCONFIRMED,
                                                c->pending.message_attempt, 0, 0, true);
             } else {
-                disconnect_radio(c, "Radio command timed out; reconnecting");
-                return;
+                uint8_t code = c->pending.data[0];
+                memset(&c->pending, 0, sizeof(c->pending));
+                c->pending_since = 0;
+                if (purpose == RADIO_PURPOSE_EXPORT_SELF) c->clipboard_client = -1;
+                if (c->session_phase != RADIO_SESSION_READY ||
+                    ++c->command_timeout_failures >= RADIO_TIMEOUT_FAILURE_LIMIT) {
+                    disconnect_radio(c, "Repeated radio command timeouts; reconnecting");
+                    return;
+                }
+                if (advert_purpose(purpose)) advert_status(c, purpose, "timed out");
+                else {
+                    char warning[160];
+                    snprintf(warning, sizeof(warning),
+                             "Radio command 0x%02x timed out; session remains ready", code);
+                    set_status(c, warning);
+                    broadcast_status(c);
+                }
             }
         } else {
             return;
@@ -918,6 +937,7 @@ static void handle_incoming_invite(core_ctx *c, qtc_message *m) {
 }
 
 static void radio_event(core_ctx *c, const qtc_radio_event *e) {
+    if (e->type != QTC_RADIO_UNKNOWN) c->command_timeout_failures = 0;
     bool matched = c->radio_pending && event_matches(&c->pending, e->type);
     radio_command completed = {0};
     if (matched) {
@@ -1199,6 +1219,7 @@ static int connect_radio(core_ctx *c) {
         (void)qtc_db_save_setting(&c->db, "serial_device", device);
     }
     c->queue_head = c->queue_count = 0;
+    c->command_timeout_failures = 0;
     c->radio_pending = false;
     c->session_phase = RADIO_SESSION_DOWN;
     c->contacts_sync_needed = false;
@@ -1231,6 +1252,7 @@ static void disconnect_radio(core_ctx *c, const char *reason) {
     qtc_serial_parser_init(&c->serial.parser);
     memset(&c->pending, 0, sizeof(c->pending));
     c->pending_since = c->next_stored_poll = c->background_sync_after = 0;
+    c->command_timeout_failures = 0;
     c->state.radio_name[0] = c->state.radio_model[0] = c->state.radio_version[0] = 0;
     c->state.radio_max_channels = 8; c->state.radio_max_contacts = QTC_MAX_CONTACTS;
     c->state.radio_tx_power = c->state.radio_max_tx_power = 0;
