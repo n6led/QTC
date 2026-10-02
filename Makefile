@@ -45,6 +45,8 @@ src/%.o: src/%.c
 build/tests/%: tests/%.c $(LIB_OBJ) | build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB_OBJ) $(LDLIBS)
 
+build/tests/test_radio_diagnostics: tests/test_radio_diagnostics.c src/core.c
+
 build/tests/test_tui_mentions: tests/test_tui_mentions.c src/tui.c
 build/tests/test_tui_nodes: tests/test_tui_nodes.c src/tui.c
 build/tests/test_tui_themes: tests/test_tui_themes.c src/tui.c
