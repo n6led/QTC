@@ -27,7 +27,9 @@
 
 #define RADIO_QUEUE 128
 #define RADIO_DEFAULT_TIMEOUT_MS 1500
-#define RADIO_INBOX_TIMEOUT_MS 250
+/* Experimental inbox probe: retain ownership beyond the diagnostic deadline. */
+#define RADIO_INBOX_SOFT_TIMEOUT_MS 250
+#define RADIO_INBOX_TIMEOUT_MS 5000
 #define RADIO_CONTACTS_TIMEOUT_MS 5000
 #define INBOX_FALLBACK_POLL_MS 500
 #define BACKGROUND_SYNC_DELAY_MS 1500
@@ -112,6 +114,7 @@ typedef struct {
     radio_session_phase session_phase;
     radio_command pending;
     int64_t pending_since;
+    bool inbox_soft_timeout_logged;
     char last_status[160];
 } core_ctx;
 
@@ -134,7 +137,113 @@ static int64_t reconnect_clock(void) {
 static volatile sig_atomic_t g_stop;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
+static bool radio_trace_enabled(void) {
+    const char *value = getenv("QTC_TRACE_RADIO");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
+static const char *radio_command_name(int value) {
+    switch (value) {
+        case 1: return "CMD_APP_START";
+        case 2: return "CMD_SEND_TXT";
+        case 3: return "CMD_SEND_CHANNEL";
+        case 4: return "CMD_GET_CONTACTS";
+        case 7: return "CMD_SEND_ADVERT";
+        case 8: return "CMD_SET_NAME";
+        case 10: return "CMD_SYNC_MESSAGE";
+        case 11: return "CMD_SET_RADIO";
+        case 12: return "CMD_SET_POWER";
+        case 13: return "CMD_RESET_PATH";
+        case 17: return "CMD_EXPORT_CONTACT";
+        case 20: return "CMD_GET_BATTERY";
+        case 22: return "CMD_DEVICE_QUERY";
+        case 31: return "CMD_GET_CHANNEL";
+        case 32: return "CMD_SET_CHANNEL";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *radio_event_name(qtc_radio_event_type value) {
+    switch (value) {
+        case QTC_RADIO_NONE: return "QTC_RADIO_NONE";
+        case QTC_RADIO_OK: return "QTC_RADIO_OK";
+        case QTC_RADIO_ERROR: return "QTC_RADIO_ERROR";
+        case QTC_RADIO_CONTACT_START: return "QTC_RADIO_CONTACT_START";
+        case QTC_RADIO_CONTACT: return "QTC_RADIO_CONTACT";
+        case QTC_RADIO_CONTACT_END: return "QTC_RADIO_CONTACT_END";
+        case QTC_RADIO_SELF_INFO: return "QTC_RADIO_SELF_INFO";
+        case QTC_RADIO_MSG_SENT: return "QTC_RADIO_MSG_SENT";
+        case QTC_RADIO_CONTACT_MESSAGE: return "QTC_RADIO_CONTACT_MESSAGE";
+        case QTC_RADIO_CHANNEL_MESSAGE: return "QTC_RADIO_CHANNEL_MESSAGE";
+        case QTC_RADIO_NO_MORE_MESSAGES: return "QTC_RADIO_NO_MORE_MESSAGES";
+        case QTC_RADIO_BATTERY: return "QTC_RADIO_BATTERY";
+        case QTC_RADIO_EXPORT_CONTACT: return "QTC_RADIO_EXPORT_CONTACT";
+        case QTC_RADIO_DEVICE_INFO: return "QTC_RADIO_DEVICE_INFO";
+        case QTC_RADIO_CHANNEL_INFO: return "QTC_RADIO_CHANNEL_INFO";
+        case QTC_RADIO_ACK: return "QTC_RADIO_ACK";
+        case QTC_RADIO_MESSAGES_WAITING: return "QTC_RADIO_MESSAGES_WAITING";
+        case QTC_RADIO_CONTACTS_DIRTY: return "QTC_RADIO_CONTACTS_DIRTY";
+        case QTC_RADIO_NEW_ADVERT: return "QTC_RADIO_NEW_ADVERT";
+        case QTC_RADIO_UNKNOWN: return "QTC_RADIO_UNKNOWN";
+        default: return "UNKNOWN";
+    }
+}
+
+/* 0x88/0x8f names are diagnostic labels from Companion MyMesh.cpp;
+ * QTC still parses these two pushes as UNKNOWN. */
+static const char *radio_response_name(int value) {
+    switch (value) {
+        case 0: return "RESP_CODE_OK";
+        case 1: return "RESP_CODE_ERR";
+        case 2: return "RESP_CODE_CONTACTS_START";
+        case 3: return "RESP_CODE_CONTACT";
+        case 4: return "RESP_CODE_END_OF_CONTACTS";
+        case 5: return "RESP_CODE_SELF_INFO";
+        case 6: return "RESP_CODE_SENT";
+        case 7: return "RESP_CODE_CONTACT_MSG_RECV";
+        case 8: return "RESP_CODE_CHANNEL_MSG_RECV";
+        case 10: return "RESP_CODE_NO_MORE_MESSAGES";
+        case 11: return "RESP_CODE_EXPORT_CONTACT";
+        case 12: return "RESP_CODE_BATT_AND_STORAGE";
+        case 13: return "RESP_CODE_DEVICE_INFO";
+        case 16: return "RESP_CODE_CONTACT_MSG_RECV_V3";
+        case 17: return "RESP_CODE_CHANNEL_MSG_RECV_V3";
+        case 18: return "RESP_CODE_CHANNEL_INFO";
+        case 128: return "PUSH_CODE_ADVERT";
+        case 129: return "PUSH_CODE_PATH_UPDATED";
+        case 130: return "PUSH_CODE_SEND_CONFIRMED";
+        case 131: return "PUSH_CODE_MSG_WAITING";
+        case 136: return "PUSH_CODE_LOG_RX_DATA";
+        case 138: return "PUSH_CODE_NEW_ADVERT";
+        case 143: return "PUSH_CODE_CONTACT_DELETED";
+        default: return "UNKNOWN";
+    }
+}
+
+static int radio_command_timeout_ms(const radio_command *command);
+
+/* Times are host observations, not on-wire or firmware receipt timestamps.
+ * since/deadline use the existing wall-clock timer; mono_ms is diagnostic only. */
+static void trace_command(const core_ctx *c, const char *action,
+                          const radio_command *cmd, int64_t since) {
+    if (!radio_trace_enabled()) return;
+    int64_t wall = qtc_now_millis();
+    int timeout = radio_command_timeout_ms(cmd);
+    qtc_log(QTC_LOG_INFO,
+            "radio command action=%s wall_ms=%lld mono_ms=%lld opcode=0x%02x name=%s purpose=%d attempt=%d message_attempt=%d timeout_ms=%d soft_timeout_ms=%d since_ms=%lld deadline_ms=%lld age_ms=%lld phase=%d expected=%s|%s|%s queue=%zu",
+            action, (long long)wall, (long long)reconnect_clock(),
+            cmd->data[0], radio_command_name(cmd->data[0]), (int)cmd->purpose,
+            cmd->transport_attempts + 1, cmd->message_attempt, timeout,
+            cmd->data[0] == 10 ? RADIO_INBOX_SOFT_TIMEOUT_MS : 0,
+            (long long)since, since ? (long long)(since + timeout) : 0LL,
+            since ? (long long)(wall - since) : 0LL, (int)c->session_phase,
+            radio_event_name(cmd->expected_a), radio_event_name(cmd->expected_b),
+            radio_event_name(cmd->expected_c), c->queue_count);
+}
+
 static void set_status(core_ctx *c, const char *message) {
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "status request changed=%d old=[%s] new=[%s]",
+            strcmp(c->last_status, message) != 0, c->last_status, message);
     if (strcmp(c->last_status, message) != 0) {
         qtc_strlcpy(c->last_status, message, sizeof(c->last_status));
         c->state.revisions.status++;
@@ -413,6 +522,7 @@ static int queue_radio_ex(core_ctx *c, const uint8_t *data, size_t len,
     cmd->message_attempt = message_attempt;
     cmd->priority = priority;
     c->queue_count++;
+    trace_command(c, "enqueue", cmd, 0);
     return 0;
 }
 
@@ -724,6 +834,7 @@ static bool queue_pop_next(core_ctx *c, radio_command *out) {
         c->queue[dst] = c->queue[src];
     }
     c->queue_count--;
+    trace_command(c, "dequeue", out, 0);
     return true;
 }
 
@@ -753,16 +864,26 @@ static int radio_command_transport_retries(const radio_command *command) {
 static void service_radio_queue(core_ctx *c) {
     if (!c->state.radio_connected || c->serial.fd < 0) return;
     if (c->radio_pending) {
-        if (qtc_now_millis() - c->pending_since >
-            radio_command_timeout_ms(&c->pending)) {
+        int64_t age = qtc_now_millis() - c->pending_since;
+        bool inbox = c->pending.len > 0 && c->pending.data[0] == 10;
+        if (inbox && age >= RADIO_INBOX_SOFT_TIMEOUT_MS && !c->inbox_soft_timeout_logged) {
+            c->inbox_soft_timeout_logged = true;
+            trace_command(c, "soft-timeout", &c->pending, c->pending_since);
+        }
+        if (inbox ? age >= RADIO_INBOX_TIMEOUT_MS :
+                    age > radio_command_timeout_ms(&c->pending)) {
+            trace_command(c, inbox ? "hard-timeout" : "timeout", &c->pending, c->pending_since);
             qtc_log(QTC_LOG_WARN, "radio command 0x%02x timed out", c->pending.data[0]);
             if (c->pending.transport_attempts <
                 radio_command_transport_retries(&c->pending)) {
                 c->pending.transport_attempts++;
+                trace_command(c, "tx-begin", &c->pending, 0);
                 if (qtc_serial_send(&c->serial, c->pending.data, c->pending.len) == 0) {
                     c->pending_since = qtc_now_millis();
+                    trace_command(c, "tx-complete", &c->pending, c->pending_since);
                     return;
                 }
+                trace_command(c, "tx-failed", &c->pending, 0);
                 disconnect_radio(c, "Radio write failed; reconnecting");
                 return;
             }
@@ -803,12 +924,16 @@ static void service_radio_queue(core_ctx *c) {
     } while (c->queue_count > 0);
     /* A failed write may have transmitted a partial or complete command. */
     c->radio_pending = true;
+    c->inbox_soft_timeout_logged = false;
+    trace_command(c, "tx-begin", &c->pending, 0);
     if (qtc_serial_send(&c->serial, c->pending.data, c->pending.len) != 0) {
+        trace_command(c, "tx-failed", &c->pending, 0);
         qtc_log(QTC_LOG_WARN, "serial write failed: %s", strerror(errno));
         disconnect_radio(c, "Radio write failed; reconnecting");
         return;
     }
     c->pending_since = qtc_now_millis();
+    trace_command(c, "tx-complete", &c->pending, c->pending_since);
     qtc_log(QTC_LOG_DEBUG, "radio TX cmd=0x%02x purpose=%d queue=%zu",
             c->pending.data[0], (int)c->pending.purpose, c->queue_count);
     if (c->pending.message_key[0]) {
@@ -918,9 +1043,24 @@ static void handle_incoming_invite(core_ctx *c, qtc_message *m) {
 }
 
 static void radio_event(core_ctx *c, const qtc_radio_event *e) {
+    /* Capture ownership before matching. An unmatched error has no request ID. */
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO,
+            "radio response event=%d event_name=%s error=%d matched=%d pending=%d cmd=%d purpose=%d age_ms=%lld attempt=%d phase=%d",
+            (int)e->type, radio_event_name(e->type), e->type == QTC_RADIO_ERROR ? e->error_code : -1,
+            c->radio_pending && event_matches(&c->pending, e->type),
+            c->radio_pending, c->radio_pending ? c->pending.data[0] : -1,
+            c->radio_pending ? (int)c->pending.purpose : -1,
+            c->radio_pending ? (long long)(qtc_now_millis() - c->pending_since) : -1LL,
+            c->radio_pending ? c->pending.transport_attempts : -1,
+            (int)c->session_phase);
     bool matched = c->radio_pending && event_matches(&c->pending, e->type);
     radio_command completed = {0};
     if (matched) {
+        if (c->pending.len > 0 && c->pending.data[0] == 10 &&
+            qtc_now_millis() - c->pending_since >= RADIO_INBOX_SOFT_TIMEOUT_MS)
+            trace_command(c, "late-response", &c->pending, c->pending_since);
+        trace_command(c, e->type == QTC_RADIO_ERROR ? "rejected" : "completed",
+                      &c->pending, c->pending_since);
         completed = c->pending;
         c->radio_pending = false;
     }
@@ -1159,6 +1299,9 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             } else if (matched && advert_purpose(completed.purpose)) {
                 advert_status(c, completed.purpose, "failed");
             } else {
+                if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO,
+                        "radio error sets rejection status error=%d matched=%d completed_cmd=%d",
+                        e->error_code, matched, matched ? completed.data[0] : -1);
                 set_status(c, "Radio rejected the last command");
                 broadcast_status(c);
             }
@@ -1167,6 +1310,8 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             break;
     }
 
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "radio event handled event=%d matched=%d status=[%s]",
+            (int)e->type, matched, c->last_status);
     /* The companion protocol is request/response, but the next request can be
      * issued immediately after the matching frame. Do not wait for the outer
      * event-loop timer tick, especially while draining received messages. */
@@ -1176,6 +1321,10 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
 static void radio_frame_cb(const uint8_t *frame, size_t len, void *userdata) {
     core_ctx *c = userdata; qtc_radio_event e;
     if (c->serial.fd < 0) return;
+    /* Header/error metadata only: never dump message bodies or contact keys. */
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "radio frame response=%d name=%s len=%zu error_byte=%d",
+            len > 0 ? frame[0] : -1, radio_response_name(len > 0 ? frame[0] : -1), len,
+            len > 1 && frame[0] == 1 ? frame[1] : -1);
     if (qtc_protocol_parse(frame, len, &e) == 0) radio_event(c, &e);
     else qtc_log(QTC_LOG_WARN, "ignored malformed radio frame (%zu bytes)", len);
 }
@@ -1231,6 +1380,7 @@ static void disconnect_radio(core_ctx *c, const char *reason) {
     qtc_serial_parser_init(&c->serial.parser);
     memset(&c->pending, 0, sizeof(c->pending));
     c->pending_since = c->next_stored_poll = c->background_sync_after = 0;
+    c->inbox_soft_timeout_logged = false;
     c->state.radio_name[0] = c->state.radio_model[0] = c->state.radio_version[0] = 0;
     c->state.radio_max_channels = 8; c->state.radio_max_contacts = QTC_MAX_CONTACTS;
     c->state.radio_tx_power = c->state.radio_max_tx_power = 0;
