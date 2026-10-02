@@ -134,7 +134,14 @@ static int64_t reconnect_clock(void) {
 static volatile sig_atomic_t g_stop;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
+static bool radio_trace_enabled(void) {
+    const char *value = getenv("QTC_TRACE_RADIO");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 static void set_status(core_ctx *c, const char *message) {
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "status request changed=%d old=[%s] new=[%s]",
+            strcmp(c->last_status, message) != 0, c->last_status, message);
     if (strcmp(c->last_status, message) != 0) {
         qtc_strlcpy(c->last_status, message, sizeof(c->last_status));
         c->state.revisions.status++;
@@ -918,6 +925,16 @@ static void handle_incoming_invite(core_ctx *c, qtc_message *m) {
 }
 
 static void radio_event(core_ctx *c, const qtc_radio_event *e) {
+    /* Capture ownership before matching. An unmatched error has no request ID. */
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO,
+            "radio response event=%d error=%d matched=%d pending=%d cmd=%d purpose=%d age_ms=%lld attempt=%d phase=%d",
+            (int)e->type, e->type == QTC_RADIO_ERROR ? e->error_code : -1,
+            c->radio_pending && event_matches(&c->pending, e->type),
+            c->radio_pending, c->radio_pending ? c->pending.data[0] : -1,
+            c->radio_pending ? (int)c->pending.purpose : -1,
+            c->radio_pending ? (long long)(qtc_now_millis() - c->pending_since) : -1LL,
+            c->radio_pending ? c->pending.transport_attempts : -1,
+            (int)c->session_phase);
     bool matched = c->radio_pending && event_matches(&c->pending, e->type);
     radio_command completed = {0};
     if (matched) {
@@ -1159,6 +1176,9 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             } else if (matched && advert_purpose(completed.purpose)) {
                 advert_status(c, completed.purpose, "failed");
             } else {
+                if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO,
+                        "radio error sets rejection status error=%d matched=%d completed_cmd=%d",
+                        e->error_code, matched, matched ? completed.data[0] : -1);
                 set_status(c, "Radio rejected the last command");
                 broadcast_status(c);
             }
@@ -1167,6 +1187,8 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             break;
     }
 
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "radio event handled event=%d matched=%d status=[%s]",
+            (int)e->type, matched, c->last_status);
     /* The companion protocol is request/response, but the next request can be
      * issued immediately after the matching frame. Do not wait for the outer
      * event-loop timer tick, especially while draining received messages. */
@@ -1176,6 +1198,10 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
 static void radio_frame_cb(const uint8_t *frame, size_t len, void *userdata) {
     core_ctx *c = userdata; qtc_radio_event e;
     if (c->serial.fd < 0) return;
+    /* Header/error metadata only: never dump message bodies or contact keys. */
+    if (radio_trace_enabled()) qtc_log(QTC_LOG_INFO, "radio frame response=%d len=%zu error_byte=%d",
+            len > 0 ? frame[0] : -1, len,
+            len > 1 && frame[0] == 1 ? frame[1] : -1);
     if (qtc_protocol_parse(frame, len, &e) == 0) radio_event(c, &e);
     else qtc_log(QTC_LOG_WARN, "ignored malformed radio frame (%zu bytes)", len);
 }
