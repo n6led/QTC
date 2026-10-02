@@ -27,7 +27,7 @@
 
 #define RADIO_QUEUE 128
 #define RADIO_DEFAULT_TIMEOUT_MS 1500
-#define RADIO_INBOX_TIMEOUT_MS 250
+#define RADIO_INBOX_TIMEOUT_MS 2000
 #define RADIO_CONTACTS_TIMEOUT_MS 5000
 #define INBOX_FALLBACK_POLL_MS 500
 #define BACKGROUND_SYNC_DELAY_MS 1500
@@ -753,8 +753,9 @@ static int radio_command_transport_retries(const radio_command *command) {
 static void service_radio_queue(core_ctx *c) {
     if (!c->state.radio_connected || c->serial.fd < 0) return;
     if (c->radio_pending) {
-        if (qtc_now_millis() - c->pending_since >
-            radio_command_timeout_ms(&c->pending)) {
+        int64_t age = qtc_now_millis() - c->pending_since;
+        int timeout = radio_command_timeout_ms(&c->pending);
+        if (c->pending.data[0] == 10 ? age >= timeout : age > timeout) {
             qtc_log(QTC_LOG_WARN, "radio command 0x%02x timed out", c->pending.data[0]);
             if (c->pending.transport_attempts <
                 radio_command_transport_retries(&c->pending)) {
