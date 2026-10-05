@@ -127,7 +127,8 @@ def main() -> None:
     screen = render_terminal(bytes(output))
     assert screen[0].startswith(" QTC TERMINAL 1.3.0"), screen[0]
     assert screen[2].startswith("  CHANNELS"), screen[2]
-    assert "| Select a conversation" in screen[2], screen[2]
+    assert "| # Public" in screen[2], screen[2]
+    assert "Message:" not in screen[ROWS - 1], screen[ROWS - 1]
     assert "F4 Settings" in screen[ROWS - 2], screen[ROWS - 2]
     # The historical bug placed each row at an increasing horizontal offset.
     assert screen[3].startswith(" > Public"), screen[3]
@@ -160,6 +161,8 @@ def main() -> None:
     output.extend(read_available(master, 0.4))
     ana_selected = render_terminal(bytes(output))
     assert any(line.startswith(" > Ana") for line in ana_selected), "Ana was not selected"
+    assert "| Ana" in ana_selected[2], ana_selected[2]
+    assert "Message:" not in ana_selected[ROWS - 1], ana_selected[ROWS - 1]
 
     # Exercise real roster rendering with a terminal that advances only one
     # column for emoji libc counts as wide. Re-anchors must protect the divider.
@@ -203,6 +206,14 @@ def main() -> None:
     output.extend(read_available(master, 0.5))
 
     os.write(master, b"\r")  # Enter opens selected contact directly in compose mode
+    output.extend(read_available(master, 0.3))
+    composer = render_terminal(bytes(output))
+    assert "Message:" in composer[ROWS - 1], composer[ROWS - 1]
+    os.write(master, b"ac\x1b[Db")  # insert in the middle
+    output.extend(read_available(master, 0.3))
+    composer = render_terminal(bytes(output))
+    assert "Message: abc" in composer[ROWS - 1], composer[ROWS - 1]
+    os.write(master, b"\x1b[H\x1b[3~\x1b[3~\x1b[3~")  # clear at cursor
     long_message = "Long message čćž " + ("0123456789" * 30)
     os.write(master, long_message.encode("utf-8") + b"\r")
     output.extend(read_available(master, 0.8))

@@ -260,6 +260,16 @@ emoji are preserved; malformed UTF-8, control characters, and names containing
 `[` or `]` are excluded. Complete `@[Name]` mentions use the theme's accent style,
 including when wrapped, without altering stored text or notification behavior.
 
+Up/Down in the roster previews the highlighted conversation's cached history
+without marking it read. Enter activates it and opens the composer directly;
+Tab activates it for message-history navigation. Category headings are not
+message targets.
+
+The single-line composer supports Left/Right by UTF-8 code point, Home/End,
+Backspace before the cursor, and Delete at the cursor. Typed text inserts at the
+cursor. Long drafts scroll horizontally by display width while keeping the
+`Message:` prefix and insertion cursor visible, including after resizing.
+
 A single draft is kept in memory for the open conversation. Escape from ordinary
 composition saves it; `m` resumes it. Reply prepends a mention and quote to that draft rather
 than replacing it. Escape from reply composition restores the pre-reply draft;

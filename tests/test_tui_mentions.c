@@ -85,6 +85,7 @@ static void test_quoted_selection(void) {
     normal_key(t, '\r'); ASSERT_STREQ(t->input, "@[A] > first message | @[A] ");
     escape_mode(t); ASSERT_STREQ(t->draft, "");
     t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "0");
+    t->selected_kind = 0; /* Fixture switches the active conversation directly. */
     t->state.message_count = 0;
     add_message(t, "older", "older", "A: first message", 1, 1);
     add_message(t, "newer", "newer", "A: second message", 1, 1);
@@ -178,6 +179,7 @@ int main(void) {
     ASSERT_TRUE(!t->draft[0]);
 
     t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "0");
+    t->selected_kind = 0; /* Fixture switches the active conversation directly. */
     t->state.message_count = 0; t->selected_message[0] = 0;
     add_message(t, "channel", "channel", "🌱MeshGarden🍎 BOT: latest reading", 1, 1);
     normal_key(t, '\t'); draw(t); normal_key(t, 'r');
