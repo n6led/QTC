@@ -47,6 +47,8 @@ build/tests/%: tests/%.c $(LIB_OBJ) | build/tests
 
 build/tests/test_sync_message_timeout: tests/test_sync_message_timeout.c src/core.c
 
+build/tests/test_tui_composer: tests/test_tui_composer.c src/tui.c
+
 build/tests/test_tui_mentions: tests/test_tui_mentions.c src/tui.c
 build/tests/test_tui_nodes: tests/test_tui_nodes.c src/tui.c
 build/tests/test_tui_themes: tests/test_tui_themes.c src/tui.c
