@@ -43,6 +43,7 @@ typedef enum {
     QTC_IPC_CLIPBOARD_TEXT = 45,
     QTC_IPC_STATUS_DETAILS = 46,
     QTC_IPC_STATUS_DATABASE = 47,
+    QTC_IPC_IMPORT_CONTACT = 48, /* Raw decoded business-card bytes. */
     QTC_IPC_ERROR = 255
 } qtc_ipc_type;
 

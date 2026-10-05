@@ -16,6 +16,7 @@
 #define CMD_SET_POWER 12
 #define CMD_RESET_PATH 13
 #define CMD_EXPORT_CONTACT 17
+#define CMD_IMPORT_CONTACT 18
 #define CMD_GET_BATTERY 20
 #define CMD_DEVICE_QUERY 22
 #define CMD_GET_CHANNEL 31
@@ -270,4 +271,29 @@ size_t qtc_cmd_reset_path(uint8_t *out, size_t max, const uint8_t public_key[32]
     out[0] = CMD_RESET_PATH;
     memcpy(out + 1, public_key, 32);
     return 33;
+}
+
+const char *qtc_contact_card_decode(const char *uri, uint8_t *out, size_t capacity, size_t *length) {
+    *length = 0;
+    if (strncmp(uri, "meshcore://", sizeof("meshcore://") - 1) != 0) return "Contact card must start with meshcore://";
+    const char *hex = uri + sizeof("meshcore://") - 1;
+    size_t n = strlen(hex);
+    if (!n) return "Contact card payload is empty";
+    if (n % 2) return "Contact card hex must have an even length";
+    if (n / 2 > QTC_MAX_FRAME - 1 || n / 2 > capacity) return "Contact card is too large";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)hex[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return "Contact card contains non-hex characters";
+    }
+    if (qtc_hex_decode(hex, out, n / 2) < 0) return "Invalid contact card";
+    *length = n / 2;
+    return NULL;
+}
+
+size_t qtc_cmd_import_contact(uint8_t *out, size_t capacity, const uint8_t *card, size_t length) {
+    if (!length || length > QTC_MAX_FRAME - 1 || capacity <= length) return 0;
+    out[0] = CMD_IMPORT_CONTACT;
+    memcpy(out + 1, card, length);
+    return length + 1;
 }

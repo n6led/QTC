@@ -94,7 +94,7 @@ void qtc_roster_build(const qtc_state *state, const char *search, qtc_roster *r)
         const qtc_contact *c = &state->contacts[normal[x]];
         if (x == 0 || c->route_known != last_known || (c->route_known && c->route_hops != last_route)) {
             row = &r->scrollable[r->scrollable_count++]; row->kind = 4;
-            if (!c->route_known) qtc_strlcpy(row->label, "-- flood --", sizeof(row->label));
+            if (!c->route_known) qtc_strlcpy(row->label, "Unknown route (flood)", sizeof(row->label));
             else if (c->route_hops == 0) qtc_strlcpy(row->label, "-- direct --", sizeof(row->label));
             else snprintf(row->label, sizeof(row->label), "-- %d hop%s --", c->route_hops, c->route_hops == 1 ? "" : "s");
             last_known = c->route_known; last_route = c->route_hops;

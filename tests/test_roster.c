@@ -62,7 +62,7 @@ int main(void) {
     for (size_t i = 0; i < r.scrollable_count; i++) {
         if (strstr(r.scrollable[i].label, "Marko")) marko = (int)i;
         if (strstr(r.scrollable[i].label, "Zed")) zed = (int)i;
-        if (strcmp(r.scrollable[i].label, "-- flood --") == 0) flood = (int)i;
+        if (strcmp(r.scrollable[i].label, "Unknown route (flood)") == 0) flood = (int)i;
     }
     ASSERT_TRUE(marko >= 0 && zed >= 0 && flood >= 0);
     ASSERT_TRUE(marko < zed);

@@ -263,7 +263,21 @@ including when wrapped, without altering stored text or notification behavior.
 Up/Down in the roster previews the highlighted conversation's cached history
 without marking it read. Enter activates it and opens the composer directly;
 Tab activates it for message-history navigation. Category headings are not
-message targets.
+message targets. The **CONTACTS** heading groups people; **Unknown route (flood)**
+is a non-selectable route label for contacts reached by flood delivery, not a
+separate message destination. Select an individual contact to write to them.
+
+Contacts normally arrive through MeshCore advertisements and Companion contact
+sync. In message/contacts navigation, press `i` to **Import Contact**, paste a
+complete `meshcore://...` business-card string, then press Enter to import or Esc
+to cancel. Hex is case-insensitive; malformed or oversized cards are rejected
+without truncation. A connected, ready Companion is required. Import is sent
+once, without automatic retry. The radio validates the card and remains the
+contact authority; after success QTC refreshes contacts through its normal sync
+path. Firmware errors appear in Status (including a full contact table when
+reported by firmware). A timeout leaves the outcome unknown and reconnects;
+check the refreshed roster before importing again. People appear in Contacts;
+other node types remain in F7 Network Nodes.
 
 The single-line composer supports Left/Right by UTF-8 code point, Home/End,
 Backspace before the cursor, and Delete at the cursor. Typed text inserts at the

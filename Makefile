@@ -45,6 +45,9 @@ src/%.o: src/%.c
 build/tests/%: tests/%.c $(LIB_OBJ) | build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LIB_OBJ) $(LDLIBS)
 
+build/tests/test_contact_import: tests/test_contact_import.c src/core.c
+build/tests/test_tui_contact_import: tests/test_tui_contact_import.c src/tui.c
+
 build/tests/test_sync_message_timeout: tests/test_sync_message_timeout.c src/core.c
 
 build/tests/test_tui_composer: tests/test_tui_composer.c src/tui.c

@@ -39,6 +39,7 @@ typedef enum {
     RADIO_PURPOSE_DIRECT_SEND,
     RADIO_PURPOSE_CHANNEL_SEND,
     RADIO_PURPOSE_EXPORT_SELF,
+    RADIO_PURPOSE_IMPORT_CONTACT,
     RADIO_PURPOSE_ADVERT_ZERO_HOP,
     RADIO_PURPOSE_ADVERT_FLOOD
 } radio_purpose;
@@ -783,7 +784,9 @@ static void service_radio_queue(core_ctx *c) {
                     (void)update_message_state(c, message_key, QTC_MSG_UNCONFIRMED,
                                                c->pending.message_attempt, 0, 0, true);
             } else {
-                disconnect_radio(c, "Radio command timed out; reconnecting");
+                disconnect_radio(c, purpose == RADIO_PURPOSE_IMPORT_CONTACT ?
+                                 "Contact import timed out; outcome unknown; reconnecting" :
+                                 "Radio command timed out; reconnecting");
                 return;
             }
         } else {
@@ -935,6 +938,11 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
                 completed.message_key[0]) {
                 (void)update_message_state(c, completed.message_key, QTC_MSG_SENT,
                                            completed.message_attempt, 0, 0, true);
+            } else if (matched && completed.purpose == RADIO_PURPOSE_IMPORT_CONTACT) {
+                set_status(c, "Contact imported; refreshing contacts");
+                broadcast_status(c);
+                c->contacts_sync_needed = true;
+                c->background_sync_after = qtc_now_millis() + BACKGROUND_SYNC_DELAY_MS;
             } else if (matched && advert_purpose(completed.purpose)) {
                 advert_status(c, completed.purpose, "sent");
             }
@@ -1159,6 +1167,20 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
                                                completed.message_attempt, 0, 0, true);
             } else if (matched && advert_purpose(completed.purpose)) {
                 advert_status(c, completed.purpose, "failed");
+            } else if (matched && completed.purpose == RADIO_PURPOSE_IMPORT_CONTACT) {
+                const char *reason = "Companion rejected card";
+                switch (e->error_code) {
+                    case 1: reason = "unsupported by firmware"; break;
+                    case 2: reason = "not found"; break;
+                    case 3: reason = "contact table full"; break;
+                    case 4: reason = "invalid radio state"; break;
+                    case 5: reason = "firmware storage error"; break;
+                    case 6: reason = "invalid business card"; break;
+                }
+                char status[160];
+                snprintf(status, sizeof(status), "Contact import failed: %s (error %d)", reason, e->error_code);
+                set_status(c, status);
+                broadcast_status(c);
             } else {
                 set_status(c, "Radio rejected the last command");
                 broadcast_status(c);
@@ -1647,6 +1669,25 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
                         broadcast_status(c);
                         service_radio_queue(c);
                     }
+                }
+            }
+            break;
+        case QTC_IPC_IMPORT_CONTACT:
+            if (c->demo || !c->state.radio_connected || c->session_phase != RADIO_SESSION_READY) {
+                reply_error(c, "Contact import requires a connected, ready radio");
+            } else if (queue_has_code(c, 18)) {
+                reply_error(c, "Contact import is already pending");
+            } else {
+                uint8_t cmd[QTC_MAX_FRAME];
+                size_t n = qtc_cmd_import_contact(cmd, sizeof(cmd), f->payload, f->length);
+                if (!n) reply_error(c, "Invalid or oversized contact card");
+                else if (queue_radio_ex(c, cmd, n, QTC_RADIO_OK, QTC_RADIO_ERROR,
+                                       QTC_RADIO_NONE, "", RADIO_PURPOSE_IMPORT_CONTACT,
+                                       0, RADIO_PRIORITY_URGENT) != 0)
+                    reply_error(c, "Could not queue contact import");
+                else {
+                    set_status(c, "Importing contact...");
+                    broadcast_status(c);
                 }
             }
             break;
