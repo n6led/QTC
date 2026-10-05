@@ -95,6 +95,35 @@ static void editor_tests(void) {
     free(t);
 }
 
+/* Raw terminal bytes, not special_key(): CSI Delete and Backspace are distinct. */
+static void raw_delete_tests(void) {
+    const uint8_t del[] = {0x1b, '[', '3', '~'};
+    const uint8_t bs[] = {0x7f, 0x08};
+    tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
+    t->fd = -1;
+    for (size_t split = 0; split < sizeof(del); split++) {
+        seed(t, "Aé📡Z");
+        type_text(t, "\x1b[H\x1b[C\x1b[C");
+        ASSERT_EQ_INT(t->input_cursor, strlen("Aé"));
+        process_input(t, del, split);
+        process_input(t, del + split, sizeof(del) - split);
+        ASSERT_STREQ(t->input, "AéZ");
+        ASSERT_EQ_INT(t->input_cursor, strlen("Aé"));
+        ASSERT_EQ_INT(t->mode, MODE_COMPOSE);
+        ASSERT_EQ_INT(t->escape_len, 0);
+        process_input(t, &bs[0], 1);
+        ASSERT_STREQ(t->input, "AZ"); ASSERT_EQ_INT(t->input_cursor, 1);
+        process_input(t, &bs[1], 1);
+        ASSERT_STREQ(t->input, "Z"); ASSERT_EQ_INT(t->input_cursor, 0);
+    }
+    seed(t, "abc"); type_text(t, "\x1b[H\x1b[C");
+    for (size_t i = 0; i < sizeof(del); i++) process_input(t, del + i, 1);
+    ASSERT_STREQ(t->input, "ac"); ASSERT_EQ_INT(t->input_cursor, 1);
+    type_text(t, "\x1b[F"); process_input(t, del, sizeof(del));
+    ASSERT_STREQ(t->input, "ac"); ASSERT_EQ_INT(t->input_cursor, 2);
+    free(t);
+}
+
 static void navigation_tests(void) {
     tui_ctx *t = calloc(1, sizeof(*t)); ASSERT_TRUE(t != NULL);
     int pair[2]; ASSERT_EQ_INT(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);
@@ -169,7 +198,7 @@ static void navigation_tests(void) {
 
 int main(void) {
     ASSERT_TRUE(setlocale(LC_CTYPE, "") != NULL);
-    editor_tests(); navigation_tests();
+    editor_tests(); raw_delete_tests(); navigation_tests();
     puts("TUI composer and navigation tests passed");
     return 0;
 }
