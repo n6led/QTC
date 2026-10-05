@@ -6,6 +6,7 @@
 #include "qtc/mention.h"
 #include "qtc/notify.h"
 #include "qtc/roster.h"
+#include "qtc/protocol.h"
 #include "qtc/util.h"
 
 #include <errno.h>
@@ -34,7 +35,7 @@ typedef enum {
     MODE_INVITE_PICKER, MODE_INVITE_REVIEW, MODE_ROTATE_CONFIRM, MODE_LEAVE_CONFIRM,
     MODE_INCOMING_INVITE, MODE_ALIAS, MODE_FAVORITE_GROUP, MODE_DEVICE_NAME,
     MODE_TX_POWER, MODE_THEME_PICKER, MODE_PRESET_PICKER, MODE_MESSAGE_SELECT,
-    MODE_NODE_DETAIL
+    MODE_NODE_DETAIL, MODE_IMPORT_CONTACT
 } tui_mode;
 
 typedef struct {
@@ -67,6 +68,10 @@ typedef struct {
     int64_t action_feedback_until;
     bool advert_feedback_pending;
     char search[QTC_MAX_NAME];
+    char card_input[QTC_CONTACT_CARD_URI_SIZE];
+    size_t card_length;
+    bool card_overflow;
+    char card_error[160];
     char input[QTC_MAX_TEXT];
     size_t input_len;
     size_t input_cursor; /* byte boundary in the editable draft */
@@ -1052,6 +1057,27 @@ static void normal_key(tui_ctx *t, unsigned char c) {
         t->help_open = true; t->help_scroll = 0; t->dirty = true;
         return;
     }
+    if (t->mode == MODE_IMPORT_CONTACT) {
+        if (c == 27) t->mode = MODE_NORMAL;
+        else if (c == '\r' || c == '\n') {
+            uint8_t card[QTC_MAX_FRAME - 1]; size_t length;
+            const char *error = t->card_overflow ? "Card too large; Esc and paste a complete smaller card" :
+                qtc_contact_card_decode(t->card_input, card, sizeof(card), &length);
+            if (!error && qtc_ipc_send(t->fd, QTC_IPC_IMPORT_CONTACT, card, (uint32_t)length) != 0)
+                error = "Could not submit contact import to core";
+            if (error) qtc_strlcpy(t->card_error, error, sizeof(t->card_error));
+            else { t->mode = MODE_NORMAL; qtc_strlcpy(t->status, "Contact import submitted", sizeof(t->status)); }
+        } else if (c == 127 || c == 8) {
+            if (t->card_length) t->card_input[--t->card_length] = 0;
+        } else if (c >= 32) {
+            if (t->card_length + 1 < sizeof(t->card_input)) {
+                t->card_input[t->card_length++] = (char)c;
+                t->card_input[t->card_length] = 0;
+            } else t->card_overflow = true;
+        }
+        t->dirty = true;
+        return;
+    }
     if (t->mode == MODE_NODE_DETAIL) {
         if (c == 'j') scroll_node_detail(t, 1);
         else if (c == 'k') scroll_node_detail(t, -1);
@@ -1127,6 +1153,11 @@ static void normal_key(tui_ctx *t, unsigned char c) {
     if (t->view == VIEW_MESSAGES) {
         if (c == 'j') move_menu(t, 1); else if (c == 'k') move_menu(t, -1);
         else if (c == '/') { t->mode = MODE_SEARCH; qtc_strlcpy(t->input, t->search, sizeof(t->input)); t->input_len = strlen(t->input); t->dirty = true; }
+        else if (c == 'i') {
+            t->mode = MODE_IMPORT_CONTACT; t->card_length = 0;
+            t->card_input[0] = 0; t->card_error[0] = 0; t->card_overflow = false;
+            t->dirty = true;
+        }
         else if (c == 'm' && t->open_key[0]) start_input(t, MODE_COMPOSE);
         else if (c == 'f' && (t->selected_kind == 2 || t->selected_kind == 3)) {
             qtc_contact *ct = find_contact(t, t->selected_key); if (ct) { qtc_ipc_favorite_payload p = {.favorite = !ct->favorite};
@@ -1222,6 +1253,8 @@ static void normal_key(tui_ctx *t, unsigned char c) {
 }
 
 static void special_key(tui_ctx *t, const char *seq) {
+    /* Do not move the roster or invoke actions while pasting a card. */
+    if (t->mode == MODE_IMPORT_CONTACT && strcmp(seq, "\x1b[19~") != 0) return;
     if (t->help_open && strcmp(seq, "\x1b[19~") != 0) {
         if (strcmp(seq, "\x1b[B") == 0) t->help_scroll++;
         else if (strcmp(seq, "\x1b[A") == 0 && t->help_scroll) t->help_scroll--;
@@ -2424,6 +2457,19 @@ static void render_modal(tui_ctx *t, screen *s) {
     int h = 9;
     int top = (t->height - h) / 2;
     int left = (t->width - w) / 2;
+    if (t->mode == MODE_IMPORT_CONTACT) {
+        int visible = w > 10 ? w - 10 : 1;
+        size_t offset = t->card_length >= (size_t)visible ? t->card_length - (size_t)visible + 1 : 0;
+        screen_box(s, top, left, h, w, "IMPORT CONTACT");
+        screen_put_text(s, top + 2, left + 3, w - 6, "Paste meshcore:// business card:", UI_NORMAL);
+        screen_fill(s, top + 4, left + 3, w - 6, UI_INPUT);
+        screen_put_text(s, top + 4, left + 4, visible, t->card_input + offset, UI_INPUT);
+        screen_put_text(s, top + 6, left + 3, w - 6,
+                        t->card_error[0] ? t->card_error : "Enter imports. Esc cancels.", UI_MUTED);
+        s->cursor = true; s->cursor_r = top + 5;
+        s->cursor_c = left + 5 + (int)(t->card_length - offset);
+        return;
+    }
     if (t->mode == MODE_ALIAS || t->mode == MODE_FAVORITE_GROUP ||
         t->mode == MODE_DEVICE_NAME || t->mode == MODE_TX_POWER) {
         const char *title = "EDIT VALUE";
@@ -2623,6 +2669,7 @@ static void render_help(tui_ctx *t, screen *s) {
         {"f", "Toggle favorite"},
         {"F2 / e", "Edit alias"},
         {"g", "Edit favorite group"},
+        {"i", "Import contact business card"},
         {"", ""},
         {NULL, "MESSAGE HISTORY"},
         {"Tab", "Select messages / return to roster"},

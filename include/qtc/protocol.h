@@ -3,6 +3,11 @@
 
 #include "qtc/qtc.h"
 
+#define QTC_CONTACT_CARD_URI_SIZE (sizeof("meshcore://") + 2 * (QTC_MAX_FRAME - 1))
+/* Returns NULL on success, otherwise a user-facing validation error. */
+const char *qtc_contact_card_decode(const char *uri, uint8_t *out, size_t capacity, size_t *length);
+size_t qtc_cmd_import_contact(uint8_t *out, size_t capacity, const uint8_t *card, size_t length);
+
 typedef enum {
     QTC_RADIO_NONE = 0,
     QTC_RADIO_OK,
