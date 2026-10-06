@@ -2,6 +2,7 @@
 #include "qtc/core.h"
 #include "qtc/db.h"
 #include "qtc/invite.h"
+#include "qtc/channel.h"
 #include "qtc/ipc.h"
 #include "qtc/message.h"
 #include "qtc/notify.h"
@@ -102,6 +103,10 @@ typedef struct {
     bool contacts_sync_needed;
     uint32_t contact_since;
     int next_channel_sync;
+    bool channel_verified[QTC_MAX_CHANNELS];
+    bool channel_message_pending;
+    int channel_message_slot;
+    qtc_message channel_message;
     uint64_t inbox_generation;
     uint64_t inbox_empty_generation;
     uint64_t incoming_serial;
@@ -123,6 +128,8 @@ static void service_radio_queue(core_ctx *c);
 static void resume_outgoing_messages(core_ctx *c);
 static void disconnect_radio(core_ctx *c, const char *reason);
 static void schedule_background_sync(core_ctx *c, int64_t delay_ms);
+static void store_incoming_message(core_ctx *c, qtc_message message);
+static void orphan_channel_message(core_ctx *c);
 
 #define RADIO_RECONNECT_MS 3000
 
@@ -316,7 +323,7 @@ static void state_upsert_contact(core_ctx *c, const qtc_contact *incoming, bool 
 static void state_upsert_channel(core_ctx *c, const qtc_channel *incoming, bool preserve_unread) {
     qtc_channel merged = *incoming;
     qtc_channel *old = find_channel(c, incoming->index);
-    if (old != NULL && preserve_unread) merged.unread = old->unread;
+    if (old != NULL && preserve_unread && !memcmp(old->secret, incoming->secret, 16)) merged.unread = old->unread;
     if (old != NULL) {
         *old = merged;
     } else if (c->state.channel_count < QTC_MAX_CHANNELS) {
@@ -477,7 +484,7 @@ static void request_inbox_drain(core_ctx *c, bool force_new_generation) {
 
 static void queue_next_inbox_message(core_ctx *c, radio_priority priority) {
     if (c->session_phase != RADIO_SESSION_READY ||
-        !inbox_needs_drain(c) || queue_has_code(c, 10)) return;
+        !inbox_needs_drain(c) || queue_has_code(c, 10) || c->channel_message_pending) return;
     uint8_t cmd[2];
     size_t len = qtc_cmd_sync_next_message(cmd, sizeof(cmd));
     int rc;
@@ -633,8 +640,9 @@ static int queue_message_send(core_ctx *c, const qtc_message *m) {
                                 (uint8_t)m->attempt, wire);
         purpose = RADIO_PURPOSE_DIRECT_SEND;
     } else {
-        int channel_index = atoi(m->conversation_key);
-        n = qtc_cmd_send_channel(cmd, sizeof(cmd), channel_index,
+        qtc_channel *ch = qtc_channel_find(&c->state, m->conversation_key);
+        if (!ch) return -1;
+        n = qtc_cmd_send_channel(cmd, sizeof(cmd), ch->index,
                                  (uint32_t)m->sender_timestamp, wire);
         purpose = RADIO_PURPOSE_CHANNEL_SEND;
     }
@@ -803,6 +811,17 @@ static void service_radio_queue(core_ctx *c) {
                 continue;
             }
         }
+        if (c->pending.purpose == RADIO_PURPOSE_CHANNEL_SEND) {
+            qtc_message *message = find_message(c, c->pending.message_key);
+            qtc_channel *ch = message ? qtc_channel_find(&c->state, message->conversation_key) : NULL;
+            if (!ch || ch->index < 0 || ch->index >= QTC_MAX_CHANNELS ||
+                !c->channel_verified[ch->index] || queue_has_code(c, 32)) {
+                if (message) (void)update_message_state(c, message->message_key, QTC_MSG_FAILED, 0, 0, 0, true);
+                if (c->queue_count == 0) return;
+                continue;
+            }
+            c->pending.data[2] = (uint8_t)ch->index;
+        }
         break;
     } while (c->queue_count > 0);
     /* A failed write may have transmitted a partial or complete command. */
@@ -865,7 +884,7 @@ static void message_title(core_ctx *c, const qtc_message *m, char *title, size_t
         qtc_contact *ct = find_contact(c, m->conversation_key);
         snprintf(title, title_len, "%s", ct != NULL ? (ct->alias[0] ? ct->alias : ct->name) : "QTC direct message");
     } else {
-        qtc_channel *ch = find_channel(c, atoi(m->conversation_key));
+        qtc_channel *ch = qtc_channel_find(&c->state, m->conversation_key);
         snprintf(title, title_len, "# %s", ch != NULL ? ch->name : "QTC channel");
     }
 }
@@ -919,6 +938,58 @@ static void handle_incoming_invite(core_ctx *c, qtc_message *m) {
     inv.source_message_id = m->id; inv.status = QTC_INVITE_PENDING; inv.received_at = qtc_now_seconds();
     if (qtc_db_insert_invitation(&c->db, &inv) == 0 && inv.id != 0)
         state_upsert_invitation(c, &inv);
+}
+
+static void store_incoming_message(core_ctx *c, qtc_message message) {
+    resolve_message_contact(c, &message);
+    normalize_long_message(&message);
+    assign_unique_incoming_key(c, &message);
+    bool first_logical_part = true;
+    for (size_t i = 0; i < c->state.message_count; i++) {
+        const qtc_message *old = &c->state.messages[i];
+        if (old->direction == QTC_MSG_INCOMING &&
+            strcmp(old->logical_key, message.logical_key) == 0) {
+            first_logical_part = false;
+            break;
+        }
+    }
+    bool inserted = false;
+    if (qtc_db_insert_message(&c->db, &message, &inserted) == 0 && inserted) {
+        qtc_message *stored = state_upsert_message(c, &message, true);
+        if (first_logical_part) {
+            if (message.conversation_kind == QTC_CONV_CONTACT) {
+                qtc_contact *contact = find_contact(c, message.conversation_key);
+                if (contact != NULL) {
+                    contact->unread++;
+                    c->state.revisions.contacts++;
+                    broadcast_delta(c, QTC_IPC_CONTACT, contact, sizeof(*contact));
+                }
+            } else {
+                qtc_channel *channel = qtc_channel_find(&c->state, message.conversation_key);
+                if (channel != NULL) {
+                    channel->unread++;
+                    c->state.revisions.channels++;
+                    broadcast_delta(c, QTC_IPC_CHANNEL, channel, sizeof(*channel));
+                }
+            }
+        }
+        handle_incoming_invite(c, stored);
+        notify_incoming_message(c, stored);
+    }
+    queue_next_inbox_message(c, RADIO_PRIORITY_URGENT);
+}
+
+/* Never attach an unresolved message to whoever later occupies its slot. */
+static void orphan_channel_message(core_ctx *c) {
+    if (!c->channel_message_pending) return;
+    qtc_message message = c->channel_message;
+    snprintf(message.conversation_key, sizeof(message.conversation_key),
+             "unresolved:%lld:%llu", (long long)qtc_now_millis(),
+             (unsigned long long)++c->incoming_serial);
+    c->channel_message_pending = false;
+    store_incoming_message(c, message);
+    set_status(c, "Channel identity unavailable; message preserved as orphaned history");
+    broadcast_status(c);
 }
 
 static void radio_event(core_ctx *c, const qtc_radio_event *e) {
@@ -1004,6 +1075,8 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             qtc_log(QTC_LOG_DEBUG, "radio contact/path update deferred to idle sync");
             break;
         case QTC_RADIO_CHANNEL_INFO: {
+            if (e->channel.index >= 0 && e->channel.index < QTC_MAX_CHANNELS)
+                c->channel_verified[e->channel.index] = true;
             qtc_channel *old = find_channel(c, e->channel.index);
             bool changed = old == NULL || old->configured != e->channel.configured ||
                            strcmp(old->name, e->channel.name) != 0 ||
@@ -1012,8 +1085,16 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
                 (void)qtc_db_upsert_channel(&c->db, &e->channel);
             else
                 (void)qtc_db_remove_channel(&c->db, e->channel.index);
-            if (changed && e->channel.configured)
+            if (changed || !e->channel.configured)
                 state_upsert_channel(c, &e->channel, true);
+            if (c->channel_message_pending && c->channel_message_slot == e->channel.index) {
+                if (e->channel.configured) {
+                    qtc_message message = c->channel_message;
+                    qtc_channel_key(e->channel.secret, message.conversation_key);
+                    c->channel_message_pending = false;
+                    store_incoming_message(c, message);
+                } else orphan_channel_message(c);
+            }
             break;
         }
         case QTC_RADIO_CONTACT_MESSAGE:
@@ -1023,42 +1104,26 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
                     (long long)e->message.sender_timestamp);
             if (!inbox_needs_drain(c)) request_inbox_drain(c, true);
             qtc_message message = e->message;
-            resolve_message_contact(c, &message);
-            normalize_long_message(&message);
-            assign_unique_incoming_key(c, &message);
-            bool first_logical_part = true;
-            for (size_t i = 0; i < c->state.message_count; i++) {
-                const qtc_message *old = &c->state.messages[i];
-                if (old->direction == QTC_MSG_INCOMING &&
-                    strcmp(old->logical_key, message.logical_key) == 0) {
-                    first_logical_part = false;
+            if (message.conversation_kind == QTC_CONV_CHANNEL) {
+                int slot = atoi(message.conversation_key); /* Radio parser transport slot only. */
+                qtc_channel *ch = find_channel(c, slot);
+                if (slot >= 0 && slot < QTC_MAX_CHANNELS && !c->channel_verified[slot]) {
+                    c->channel_message = message; c->channel_message_slot = slot;
+                    c->channel_message_pending = true;
+                    uint8_t cmd[2]; size_t n = qtc_cmd_get_channel(cmd, sizeof(cmd), slot);
+                    if (queue_radio_urgent(c, cmd, n, QTC_RADIO_CHANNEL_INFO,
+                                           QTC_RADIO_ERROR, QTC_RADIO_NONE, "") != 0)
+                        orphan_channel_message(c);
+                    break;
+                }
+                if (ch && ch->configured) qtc_channel_key(ch->secret, message.conversation_key);
+                else {
+                    c->channel_message = message; c->channel_message_pending = true;
+                    orphan_channel_message(c);
                     break;
                 }
             }
-            bool inserted = false;
-            if (qtc_db_insert_message(&c->db, &message, &inserted) == 0 && inserted) {
-                qtc_message *stored = state_upsert_message(c, &message, true);
-                if (first_logical_part) {
-                    if (message.conversation_kind == QTC_CONV_CONTACT) {
-                        qtc_contact *contact = find_contact(c, message.conversation_key);
-                        if (contact != NULL) {
-                            contact->unread++;
-                            c->state.revisions.contacts++;
-                            broadcast_delta(c, QTC_IPC_CONTACT, contact, sizeof(*contact));
-                        }
-                    } else {
-                        qtc_channel *channel = find_channel(c, atoi(message.conversation_key));
-                        if (channel != NULL) {
-                            channel->unread++;
-                            c->state.revisions.channels++;
-                            broadcast_delta(c, QTC_IPC_CHANNEL, channel, sizeof(*channel));
-                        }
-                    }
-                }
-                handle_incoming_invite(c, stored);
-                notify_incoming_message(c, stored);
-            }
-            queue_next_inbox_message(c, RADIO_PRIORITY_URGENT);
+            store_incoming_message(c, message);
             break;
         }
         case QTC_RADIO_MESSAGES_WAITING:
@@ -1154,6 +1219,11 @@ static void radio_event(core_ctx *c, const qtc_radio_event *e) {
             break;
         }
         case QTC_RADIO_ERROR:
+            if (matched && c->channel_message_pending && completed.data[0] == 31 &&
+                completed.data[1] == c->channel_message_slot) {
+                orphan_channel_message(c);
+                break;
+            }
             if (matched && (completed.purpose == RADIO_PURPOSE_STARTUP_APP ||
                             completed.purpose == RADIO_PURPOSE_STARTUP_DEVICE)) {
                 disconnect_radio(c, "MeshCore rejected startup handshake; reconnecting");
@@ -1237,6 +1307,8 @@ static int connect_radio(core_ctx *c) {
 }
 
 static void disconnect_radio(core_ctx *c, const char *reason) {
+    orphan_channel_message(c);
+    memset(c->channel_verified, 0, sizeof(c->channel_verified));
     if (c->serial.fd >= 0) qtc_serial_close(&c->serial);
     /* Do not resume ambiguous transmissions, ACK timers, or queued fragments
      * after USB loss. The user decides whether to send again. */
@@ -1292,8 +1364,10 @@ static int send_message_action(core_ctx *c, qtc_conversation_kind kind,
         if (ct == NULL || ct->node_type != QTC_NODE_PERSON) return -1;
         conversation_key = ct->id;
     } else if (kind == QTC_CONV_CHANNEL) {
-        qtc_channel *ch = find_channel(c, atoi(conversation_key));
-        if (ch == NULL || !ch->configured) return -1;
+        qtc_channel *ch = qtc_channel_find(&c->state, conversation_key);
+        if (ch == NULL || !ch->configured || (!c->demo &&
+            (ch->index < 0 || ch->index >= QTC_MAX_CHANNELS ||
+             !c->channel_verified[ch->index] || queue_has_code(c, 32)))) return -1;
     } else {
         return -1;
     }
@@ -1397,9 +1471,7 @@ static int send_direct_action(core_ctx *c, const char *contact_id, const char *t
     return send_message_action(c, QTC_CONV_CONTACT, contact_id, text);
 }
 
-static int send_channel_action(core_ctx *c, int index, const char *text) {
-    char key[16];
-    snprintf(key, sizeof(key), "%d", index);
+static int send_channel_action(core_ctx *c, const char *key, const char *text) {
     return send_message_action(c, QTC_CONV_CHANNEL, key, text);
 }
 
@@ -1409,6 +1481,7 @@ static int apply_channel(core_ctx *c, int index, const char *name, const uint8_t
     if (ch.configured) { if (qtc_db_upsert_channel(&c->db, &ch) != 0) return -1; }
     else if (qtc_db_remove_channel(&c->db, index) != 0) return -1;
     if (!c->demo) {
+        if (index >= 0 && index < QTC_MAX_CHANNELS) c->channel_verified[index] = false;
         uint8_t cmd[64]; size_t n = qtc_cmd_set_channel(cmd, sizeof(cmd), index, ch.name, ch.secret);
         if (queue_radio(c, cmd, n, QTC_RADIO_OK, QTC_RADIO_ERROR, QTC_RADIO_NONE, "") != 0) return -1;
         n = qtc_cmd_get_channel(cmd, sizeof(cmd), index);
@@ -1509,7 +1582,7 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
             break;
         case QTC_IPC_SEND_CHANNEL:
             if (f->length != sizeof(qtc_ipc_send_channel_payload) ||
-                send_channel_action(c, ((const qtc_ipc_send_channel_payload *)f->payload)->channel_index,
+                send_channel_action(c, ((const qtc_ipc_send_channel_payload *)f->payload)->conversation_key,
                                     ((const qtc_ipc_send_channel_payload *)f->payload)->text) != 0)
                 reply_error(c, !c->demo && c->session_phase != RADIO_SESSION_READY ?
                             "Radio unavailable; message not sent" : "Could not send channel message");
@@ -1527,9 +1600,8 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
                         }
                     }
                 } else {
-                    int channel_index = atoi(p->key);
-                    if (qtc_db_mark_channel_read(&c->db, channel_index) == 0) {
-                        qtc_channel *channel = find_channel(c, channel_index);
+                    qtc_channel *channel = qtc_channel_find(&c->state, p->key);
+                    if (channel && qtc_db_mark_channel_read(&c->db, channel->index) == 0) {
                         if (channel != NULL && channel->unread != 0) {
                             channel->unread = 0;
                             c->state.revisions.channels++;
@@ -1793,7 +1865,7 @@ static void handle_client_frame(const qtc_ipc_frame *f, void *userdata) {
                 const qtc_ipc_channel_action_payload *p = (const void *)f->payload; char name[33]; uint8_t secret[16];
                 int slot = qtc_find_free_channel_slot(&c->state, c->state.radio_max_channels);
                 if (slot < 0) reply_error(c, "No free channel slot");
-                else if (qtc_channel_join_parse(p->uri, name, sizeof(name), secret) != 0) reply_error(c, "Enter an invitation URI, raw 32-character key, or Name:key");
+                else if (qtc_channel_join_parse(p->uri, name, sizeof(name), secret) != 0) reply_error(c, "Enter #hashtag, invitation URI, raw 32-character key, or Name:key");
                 else if (apply_channel(c, slot, name, secret) != 0) reply_error(c, "Could not join channel");
             }
             break;

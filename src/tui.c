@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "qtc/tui.h"
 #include "qtc/invite.h"
+#include "qtc/channel.h"
 #include "qtc/ipc.h"
 #include "qtc/message.h"
 #include "qtc/mention.h"
@@ -494,7 +495,7 @@ static size_t build_menu(tui_ctx *t, menu_item *items, size_t max, qtc_roster *r
     for (size_t i = 0; i < roster->pinned_count && n < max; i++) {
         qtc_roster_row *r = &roster->pinned[i]; if (r->kind != 1 && r->kind != 2) continue;
         items[n].kind = r->kind; items[n].source_index = r->source_index;
-        if (r->kind == 1) snprintf(items[n].key, sizeof(items[n].key), "%d", t->state.channels[r->source_index].index);
+        if (r->kind == 1) qtc_channel_key(t->state.channels[r->source_index].secret, items[n].key);
         else qtc_strlcpy(items[n].key, t->state.contacts[r->source_index].id, sizeof(items[n].key));
         n++;
     }
@@ -526,7 +527,7 @@ static int selected_menu_pos(tui_ctx *t, menu_item *items, size_t count) {
 
 static bool selected_target(tui_ctx *t) {
     if (t->selected_kind == 1) {
-        qtc_channel *ch = find_channel(t, atoi(t->selected_key));
+        qtc_channel *ch = qtc_channel_find(&t->state, t->selected_key);
         return t->selected_key[0] && ch && ch->configured;
     }
     if (t->selected_kind == 2 || t->selected_kind == 3) {
@@ -702,7 +703,7 @@ static void send_composed(tui_ctx *t) {
         qtc_ipc_send_direct_payload p = {0}; qtc_strlcpy(p.contact_id, t->open_key, sizeof(p.contact_id)); qtc_strlcpy(p.text, t->input, sizeof(p.text));
         (void)qtc_ipc_send(t->fd, QTC_IPC_SEND_DIRECT, &p, sizeof(p));
     } else if (t->open_kind == QTC_CONV_CHANNEL) {
-        qtc_ipc_send_channel_payload p = {.channel_index = atoi(t->open_key)}; qtc_strlcpy(p.text, t->input, sizeof(p.text));
+        qtc_ipc_send_channel_payload p = {0}; qtc_strlcpy(p.conversation_key, t->open_key, sizeof(p.conversation_key)); qtc_strlcpy(p.text, t->input, sizeof(p.text));
         (void)qtc_ipc_send(t->fd, QTC_IPC_SEND_CHANNEL, &p, sizeof(p));
     }
     t->mode = MODE_NORMAL; t->input[0] = 0; t->input_len = 0; t->dirty = true;
@@ -995,7 +996,9 @@ static void handle_enter(tui_ctx *t) {
         if (t->open_key[0]) start_input(t, MODE_COMPOSE);
     }
     else if (t->view == VIEW_CHANNELS && t->selected_channel >= 0) {
-        t->selected_kind = 1; snprintf(t->selected_key, sizeof(t->selected_key), "%d", t->selected_channel);
+        qtc_channel *ch = find_channel(t, t->selected_channel);
+        if (!ch || !ch->configured) return;
+        t->selected_kind = 1; qtc_channel_key(ch->secret, t->selected_key);
         set_view(t, VIEW_MESSAGES);
         if (open_selected(t)) start_input(t, MODE_COMPOSE);
     }
@@ -2062,8 +2065,8 @@ static void render_messages(tui_ctx *t, screen *s) {
         qtc_roster_row *rr = &roster.pinned[i];
         bool selected = false;
         if (rr->kind == 1) {
-            char key[16];
-            snprintf(key, sizeof(key), "%d", t->state.channels[rr->source_index].index);
+            char key[QTC_MAX_ID];
+            qtc_channel_key(t->state.channels[rr->source_index].secret, key);
             selected = t->selected_kind == 1 && strcmp(t->selected_key, key) == 0;
         } else if (rr->kind == 2) {
             selected = t->selected_kind == 2 && strcmp(t->selected_key, t->state.contacts[rr->source_index].id) == 0;
@@ -2103,7 +2106,7 @@ static void render_messages(tui_ctx *t, screen *s) {
             else snprintf(subtitle, sizeof(subtitle), "%s - flood - key %.12s", qtc_node_type_label(ct->node_type), ct->prefix);
         }
     } else if (displayed_kind(t) == QTC_CONV_CHANNEL) {
-        qtc_channel *ch = find_channel(t, atoi(displayed_key(t)));
+        qtc_channel *ch = qtc_channel_find(&t->state, displayed_key(t));
         if (ch != NULL) {
             snprintf(title, sizeof(title), "# %s", ch->name);
             snprintf(subtitle, sizeof(subtitle), "%s channel - radio slot %d", ch->is_private ? "private" : "public", ch->index);
@@ -2223,6 +2226,9 @@ static void render_messages(tui_ctx *t, screen *s) {
                         t->mode == MODE_COMPOSE ? (t->replying ?
                             "Enter Send  @ Mention  Tab Messages  Esc Cancel reply  F4 Settings  F8 Detach" :
                             "Enter Send  @ Mention  Tab Messages  Esc Save draft  F4 Settings  F8 Detach") :
+                        t->mode == MODE_NORMAL && (t->selected_kind == 2 || t->selected_kind == 3) &&
+                        find_contact(t, t->selected_key) != NULL ?
+                        "Enter Write  [f] Favorite  Tab Messages  F4 Settings  F8 Detach  ? Help" :
                         "Enter Write  Tab Messages  F4 Settings  F8 Detach  ? Help", UI_STATUS);
     screen_fill(s, t->height - 1, 0, t->width - 1, t->mode == MODE_SEARCH || t->mode == MODE_COMPOSE ? UI_INPUT : UI_NORMAL);
     if (t->mode == MODE_SEARCH) {
@@ -2275,7 +2281,8 @@ static void render_page_header(screen *s, const char *title, const char *descrip
 }
 
 static void render_channels(tui_ctx *t, screen *s) {
-    render_page_header(s, "CHANNELS", "Create, join, invite, rotate, or leave without exposing raw keys.");
+    render_page_header(s, "CHANNELS", "[c] Create [j] Join [i] Invite [r] Rotate [d] Leave");
+    screen_put_text(s, 5, 3, t->width - 6, "Up/Down or n/p selects; Leave keeps local history.", UI_MUTED);
     int row = 6;
     bool found = false;
     for (size_t i = 0; i < t->state.channel_count && row < t->height - 3; i++) {
@@ -2295,12 +2302,12 @@ static void render_channels(tui_ctx *t, screen *s) {
     }
     if (!found) {
         t->selected_channel = -1;
-        screen_put_text(s, row++, 5, t->width - 10, "No configured channels. Press c to create one or J to join an invitation.", UI_MUTED);
+        screen_put_text(s, row++, 5, t->width - 10, "No configured channels. Press c to create or j to join.", UI_MUTED);
     }
     size_t pending = pending_invites(t);
     if (pending > 0) screen_put_fmt(s, row + 1, 5, t->width - 10, UI_UNREAD, "%zu pending private-channel invitation%s - press v to review", pending, pending == 1 ? "" : "s");
     screen_fill(s, t->height - 2, 0, t->width - 1, UI_STATUS);
-    screen_put_text(s, t->height - 2, 1, t->width - 3, "Enter Write  c Create  j Join  i Invite  F6 Back  ? Help", UI_STATUS);
+    screen_put_text(s, t->height - 2, 1, t->width - 3, "Enter Write  [v] Review  Esc/F6 Back  [?] Help", UI_STATUS);
     screen_put_text(s, t->height - 1, 1, t->width - 3, t->status, UI_MUTED);
 }
 
@@ -2493,7 +2500,7 @@ static void render_modal(tui_ctx *t, screen *s) {
     if (t->mode == MODE_CREATE_CHANNEL || t->mode == MODE_JOIN_CHANNEL) {
         const char *title = t->mode == MODE_CREATE_CHANNEL ? "CREATE PRIVATE CHANNEL" : "JOIN PRIVATE CHANNEL";
         screen_box(s, top, left, h, w, title);
-        screen_put_text(s, top + 2, left + 3, w - 6, t->mode == MODE_CREATE_CHANNEL ? "Channel name (" QTC_DISPLAY_NAME " generates a secure key):" : "Invitation URI, raw 32-character key, or Name:key:", UI_NORMAL);
+        screen_put_text(s, top + 2, left + 3, w - 6, t->mode == MODE_CREATE_CHANNEL ? "Channel name (" QTC_DISPLAY_NAME " generates a secure key):" : "#hashtag, invitation URI, raw key, or Name:key:", UI_NORMAL);
         screen_fill(s, top + 4, left + 3, w - 6, UI_INPUT);
         screen_put_text(s, top + 4, left + 4, 2, "> ", UI_INPUT);
         screen_put_text(s, top + 4, left + 6, w - 10, t->input, UI_INPUT);
@@ -2697,7 +2704,7 @@ static void render_help(tui_ctx *t, screen *s) {
         {"Enter", "Open and write"},
         {"c / j", "Create / join"},
         {"i", "Invite"},
-        {"r / d", "Rotate key / leave"},
+        {"r / d", "Rotate key / leave (keep history)"},
         {"v", "Review pending invitations"},
         {"", ""},
         {NULL, "NETWORK NODES"},

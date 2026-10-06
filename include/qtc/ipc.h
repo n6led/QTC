@@ -47,7 +47,7 @@ typedef enum {
     QTC_IPC_ERROR = 255
 } qtc_ipc_type;
 
-#define QTC_IPC_PROTOCOL_VERSION 2U
+#define QTC_IPC_PROTOCOL_VERSION 3U
 
 /* Optional one-byte PING request; ordinary PING and STATUS remain unchanged. */
 #define QTC_IPC_STATUS_DETAILS_VERSION 1U
@@ -105,7 +105,7 @@ typedef struct {
 } qtc_ipc_send_direct_payload;
 
 typedef struct {
-    int channel_index;
+    char conversation_key[QTC_MAX_ID];
     char text[QTC_MAX_TEXT];
 } qtc_ipc_send_channel_payload;
 

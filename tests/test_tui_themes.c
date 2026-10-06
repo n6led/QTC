@@ -149,13 +149,13 @@ int main(void) {
     strcpy(ct->id, "node"); strcpy(ct->prefix, "012345abcdef");
     strcpy(ct->name, "Long network node name 📡📡📡📡📡📡"); ct->node_type = QTC_NODE_REPEATER;
     strcpy(t->selected_node, ct->id);
-    t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "0");
+    t->open_kind = QTC_CONV_CHANNEL; strcpy(t->open_key, "channel:00000000000000000000000000000000");
     t->state.channel_count = 1; t->state.channels[0].configured = true;
     strcpy(t->state.channels[0].name, "Public");
     t->state.message_count = 2;
     for (int i = 0; i < 2; i++) {
         qtc_message *m = &t->state.messages[i];
-        m->conversation_kind = QTC_CONV_CHANNEL; strcpy(m->conversation_key, "0");
+        m->conversation_kind = QTC_CONV_CHANNEL; strcpy(m->conversation_key, "channel:00000000000000000000000000000000");
         snprintf(m->message_key, sizeof(m->message_key), "message%d", i);
         strcpy(m->text, i ? "hello @[Radio]" : "outgoing 📡");
         m->direction = i ? QTC_MSG_INCOMING : QTC_MSG_OUTGOING;
