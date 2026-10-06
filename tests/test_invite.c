@@ -1,5 +1,6 @@
 #include "test.h"
 #include "qtc/invite.h"
+#include "qtc/util.h"
 #include <errno.h>
 
 int main(void) {
@@ -21,5 +22,25 @@ int main(void) {
     qtc_state state = {0}; state.channel_count = 2; state.channels[0].index = 0; state.channels[0].configured = true;
     state.channels[1].index = 1; state.channels[1].configured = true;
     ASSERT_EQ_INT(qtc_find_free_channel_slot(&state, 8), 2);
+    ASSERT_EQ_INT(qtc_channel_join_parse("#test", name, sizeof(name), parsed), 0);
+    ASSERT_STREQ(name, "#test");
+    const uint8_t known[16] = {0x9c,0xd8,0xfc,0xf2,0x2a,0x47,0x33,0x3b,0x59,0x1d,0x96,0xa2,0xb8,0x48,0xb7,0x3f};
+    ASSERT_TRUE(memcmp(parsed, known, 16) == 0);
+    const char *bad_tags[] = {"#", "#two words", "##test", "#bad\nname", "#123456789012345678901234567890123"};
+    for (size_t i = 0; i < QTC_ARRAY_LEN(bad_tags); i++)
+        ASSERT_TRUE(qtc_channel_join_parse(bad_tags[i], name, sizeof(name), parsed) != 0);
+    const struct { const char *name; const char *hex; } vectors[] = {
+    {"#hamradio", "83c8b01997654265938da8765cbc7db9"},
+    {"#centralvalley", "4b6e593421c03d58713c77d5510d0850"},
+    {"#HamRadio", "ea9d4728a29589b418e513c8e115d8b6"},
+    {"#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ce3224f05ad324b9838132b7d5c4bbde"},
+    {"#café", "7dc4f56faecbda50558edb29c331db26"}
+    };
+    for (size_t i = 0; i < QTC_ARRAY_LEN(vectors); i++) {
+        ASSERT_EQ_INT(qtc_channel_join_parse(vectors[i].name, name, sizeof(name), parsed), 0);
+        ASSERT_STREQ(name, vectors[i].name);
+        char hex[33]; qtc_hex_encode(parsed, 16, hex, sizeof(hex)); ASSERT_STREQ(hex, vectors[i].hex);
+    }
+    ASSERT_TRUE(qtc_channel_join_parse("#\xff", name, sizeof(name), parsed) != 0);
     puts("invite tests passed"); return 0;
 }

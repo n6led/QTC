@@ -255,7 +255,7 @@ def main() -> None:
     os.write(master, b"\x1b[17~")  # F6 Channels
     output.extend(read_available(master, 0.3))
     channels = render_terminal(bytes(output))
-    assert "j Join" in "\n".join(channels)
+    assert "[j] Join" in "\n".join(channels)
     os.write(master, b"j00112233445566778899aabbccddeeff\r")
     output.extend(read_available(master, 0.7))
     joined = render_terminal(bytes(output))

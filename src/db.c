@@ -179,7 +179,7 @@ int qtc_db_migrate(qtc_db *db) {
         "CREATE INDEX IF NOT EXISTS contacts_favorite_idx ON contacts(favorite,favorite_group);") != 0) goto rollback;
 
     /* QTC 2.3.1 schema 2 stored radio keys as blobs and had no channel secrets.
-     * Preserve every row. Channel secrets are refreshed from the radio after connect. */
+     * Preserve every row. Unknown secrets stay NULL here so numeric history is not guessed during migration. */
     if (table_exists(db->db, "legacy_contacts_v2")) {
         const char *import_contacts =
             "INSERT INTO contacts(id,prefix,name,alias,node_type,route_hops,route_known,favorite,"
@@ -200,7 +200,7 @@ int qtc_db_migrate(qtc_db *db) {
     if (table_exists(db->db, "legacy_channels_v2")) {
         const char *import_channels =
             "INSERT INTO channels(channel_index,name,secret,configured,is_private,unread,updated_at) "
-            "SELECT idx,coalesce(name,''),zeroblob(16),coalesce(configured,0),0,coalesce(unread,0),0 "
+            "SELECT idx,coalesce(name,''),NULL,coalesce(configured,0),0,coalesce(unread,0),0 "
             "FROM legacy_channels_v2 WHERE 1 "
             "ON CONFLICT(channel_index) DO UPDATE SET name=excluded.name,configured=excluded.configured,"
             "unread=excluded.unread;";
@@ -222,14 +222,20 @@ int qtc_db_migrate(qtc_db *db) {
         "INSERT INTO schema_meta(key,value) VALUES('legacy_v2_imported','1') ON CONFLICT(key) DO NOTHING;"
         "UPDATE settings SET value='1' WHERE key='stored_poll_seconds' AND value='5' "
         "AND NOT EXISTS (SELECT 1 FROM schema_meta WHERE key='schema_version' AND CAST(value AS INTEGER)>=10);"
-        "INSERT INTO schema_meta(key,value) VALUES('schema_version','10') "
+        /* Bind numeric history exactly once, using only this saved snapshot. */
+        "UPDATE messages SET conversation_key=(SELECT 'channel:'||lower(hex(c.secret)) "
+        "FROM channels c WHERE c.configured=1 AND typeof(c.secret)='blob' AND length(c.secret)=16 "
+        "AND messages.conversation_key=CAST(c.channel_index AS TEXT)) "
+        "WHERE conversation_kind=2 AND EXISTS (SELECT 1 FROM channels c WHERE c.configured=1 "
+        "AND typeof(c.secret)='blob' AND length(c.secret)=16 "
+        "AND messages.conversation_key=CAST(c.channel_index AS TEXT)) "
+        "AND NOT EXISTS (SELECT 1 FROM schema_meta WHERE key='schema_version' AND CAST(value AS INTEGER)>=11);"
+        "INSERT INTO schema_meta(key,value) VALUES('schema_version','11') "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
-        "COMMIT;") != 0) goto rollback_no_tx;
+        "COMMIT;") != 0) goto rollback;
     return 0;
 rollback:
     (void)exec_sql(db->db, "ROLLBACK;");
-    return -1;
-rollback_no_tx:
     return -1;
 }
 
@@ -440,6 +446,7 @@ int qtc_db_mark_contact_read(qtc_db *db, const char *id) {
 int qtc_db_upsert_channel(qtc_db *db, const qtc_channel *c) {
     const char *sql = "INSERT INTO channels(channel_index,name,secret,configured,is_private,unread,updated_at)"
                       " VALUES(?,?,?,?,?,?,?) ON CONFLICT(channel_index) DO UPDATE SET name=excluded.name,"
+                      "unread=CASE WHEN channels.secret=excluded.secret THEN channels.unread ELSE excluded.unread END,"
                       "secret=excluded.secret,configured=excluded.configured,is_private=excluded.is_private,"
                       "updated_at=excluded.updated_at";
     sqlite3_stmt *st = NULL;
@@ -512,8 +519,8 @@ int qtc_db_insert_message(qtc_db *db, qtc_message *m, bool *inserted) {
                 bind_text(u, 1, m->conversation_key); (void)sqlite3_step(u); sqlite3_finalize(u);
             }
         } else {
-            if (sqlite3_prepare_v2(db->db, "UPDATE channels SET unread=unread+1 WHERE channel_index=?", -1, &u, NULL) == SQLITE_OK) {
-                sqlite3_bind_int(u, 1, atoi(m->conversation_key)); (void)sqlite3_step(u); sqlite3_finalize(u);
+            if (sqlite3_prepare_v2(db->db, "UPDATE channels SET unread=unread+1 WHERE configured=1 AND 'channel:'||lower(hex(secret))=?", -1, &u, NULL) == SQLITE_OK) {
+                bind_text(u, 1, m->conversation_key); (void)sqlite3_step(u); sqlite3_finalize(u);
             }
         }
     }

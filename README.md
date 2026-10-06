@@ -130,8 +130,11 @@ Unplug and reconnect the radio after installing the rule. On macOS the same comm
 
 - Direct MeshCore messaging with local conversation history.
 - Channel messaging and private-channel management.
-- Join a private channel from an invitation URI, a raw 32-character key, or `Name:key`.
+- Join from a bare `#hashtag`, an invitation URI, a raw 32-character key, or `Name:key`.
 - Invite selected MeshCore contacts to private channels with an explicit confirmation screen.
+- Channel history follows the full channel secret, independently of radio slot or name.
+  Leaving keeps history; rejoining the same secret in another slot restores it.
+  A different secret (including a rotated key) has separate history.
 - Contact aliases, favorites, favorite groups, unread state, and search.
 - Contacts grouped by route distance, with infrastructure nodes separated from people.
 - Persistent background core: detach the terminal without disconnecting the radio.
@@ -296,16 +299,54 @@ Replies remain ordinary MeshCore text, for example `@[N6LED] Yes, that worked.`
 The existing message-size and multipart handling applies unchanged. No new packet
 type, reply ID, private header, database schema, or IPC payload is introduced.
 
+The normal roster footer shows `[f] Favorite` when a contact is selected.
+Press `f` again to remove the favorite; the binding is inactive while composing
+or searching and does not apply to channels.
+
 ### Channels
 
 | Key | Action |
 |---|---|
 | `c` | Create private channel |
-| `j` | Join from URI, raw key, or `Name:key` |
+| `j` | Join from `#hashtag`, URI, raw key, or `Name:key` |
 | `i` | Invite one or more contacts |
 | `r` | Rotate private-channel key |
 | `d` | Leave channel while keeping local history |
 | `v` | Review a pending invitation |
+
+### Channel identity and joining by hashtag
+
+In F6, press `j` and enter `#hamradio` to join that named hashtag channel. QTC
+preserves the name and case and derives its 16-byte secret from the first 16
+bytes of SHA-256 over the complete UTF-8 name, including `#`, as specified by the
+[MeshCore protocol](https://github.com/meshcore-dev/MeshCore/blob/main/docs/companion_protocol.md#channel-types).
+Names must contain a nonempty tag and fit the Companion's 32-byte name limit;
+ASCII whitespace, malformed UTF-8 and URI/name-key separators are rejected. Hashtag
+channels are not private: anyone who knows the name can derive their key.
+Create (`c`) still generates a random private-channel secret. Join also accepts
+channel URIs, `Name:key`, and raw 32-character keys. A raw key alone retains the
+`Private-XXXXXXXX` fallback name; the original name cannot be recovered from it.
+
+Channel conversations now use `channel:<full lowercase 32-hex secret>` internally.
+Slot numbers only address the radio's current configuration. Sends carry this
+identity to the core, which resolves the current slot before transmission. After
+reconnect, an incoming channel message waits for Get Channel if that slot has not
+yet been confirmed. If identity cannot be resolved, the message is retained as
+orphaned history rather than assigned to a later occupant of the slot.
+
+On first startup, database schema 11 transactionally binds old numeric channel
+history using only configured channels with a full secret in the saved database
+snapshot. Numeric histories without a usable matching row remain untouched and
+are never automatically reassigned later. Older databases that never stored real
+secrets cannot establish this mapping. This migration cannot untangle histories
+already mixed before the upgrade or detect an incorrect saved slot/secret
+snapshot. Direct-message identities are unchanged. Back up the database before
+upgrading. The IPC format changes require restarting the old background core;
+the client/core compatibility check prevents mixing the two formats.
+
+F6 shows `[c] Create`, `[j] Join`, `[i] Invite`, `[r] Rotate`, `[d] Leave`, and
+`[v] Review`, with Enter to write and Esc/F6 to return. **Leave preserves local
+history**; rotating to a new secret starts a separate conversation.
 
 ### Settings
 

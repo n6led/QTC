@@ -1,4 +1,5 @@
 #include "qtc/invite.h"
+#include "qtc/channel.h"
 #include "qtc/util.h"
 
 #include <ctype.h>
@@ -89,11 +90,19 @@ int qtc_channel_join_parse(const char *input, char *name, size_t name_len, uint8
         return -1;
     }
     char copy[QTC_MAX_URI];
+    if (strlen(input) >= sizeof(copy)) { errno = EINVAL; return -1; }
     qtc_strlcpy(copy, input, sizeof(copy));
     qtc_trim(copy);
     if (strncmp(copy, "meshcore://channel/add?", 23) == 0)
         return qtc_channel_uri_parse(copy, name, name_len, secret);
 
+    if (copy[0] == '#' && strchr(copy, ':') == NULL) {
+        if (strlen(copy) >= name_len || qtc_hashtag_secret(copy, secret) != 0) {
+            errno = EINVAL; return -1;
+        }
+        qtc_strlcpy(name, copy, name_len);
+        return 0;
+    }
     char *key = copy;
     char *separator = strchr(copy, ':');
     if (separator != NULL && strlen(separator + 1) == 32) {

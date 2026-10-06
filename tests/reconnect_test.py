@@ -82,7 +82,7 @@ def main():
                 assert opens == 2, opens
                 client = socket.socket(socket.AF_UNIX)
                 client.connect(str(sockpath))
-                ipc_send(client, 1, struct.pack("<I32s16s", 2, b"reconnect-test", version.encode()))
+                ipc_send(client, 1, struct.pack("<I32s16s", 3, b"reconnect-test", version.encode()))
                 while ipc_recv(client)[0] != 7:
                     pass
 
@@ -96,7 +96,7 @@ def main():
                             return payload[0]
 
                 def reject_offline():
-                    ipc_send(client, 21, struct.pack("<i768s", 0, b"must not queue offline"))
+                    ipc_send(client, 21, struct.pack("<65s768s", b"channel:" + b"0" * 32, b"must not queue offline"))
                     while True:
                         kind, payload = ipc_recv(client)
                         if kind == 255:
@@ -132,12 +132,12 @@ def main():
                     radio.queue_incoming(f"received after reconnect {cycle}")
                     wait_for(lambda: bool(sql(f"SELECT 1 FROM messages WHERE text='received after reconnect {cycle}'")))
                     # Real outbound success following each clean session initialization.
-                    ipc_send(client, 21, struct.pack("<i768s", 0, f"sent after reconnect {cycle}".encode()))
+                    ipc_send(client, 21, struct.pack("<65s768s", b"channel:" + b"0" * 32, f"sent after reconnect {cycle}".encode()))
                     wait_for(lambda: bool(sql(f"SELECT 1 FROM messages WHERE text='sent after reconnect {cycle}' AND status=2")))
                     radio.hold_send = True
-                    ipc_send(client, 21, struct.pack("<i768s", 0, f"ambiguous {cycle}".encode()))
+                    ipc_send(client, 21, struct.pack("<65s768s", b"channel:" + b"0" * 32, f"ambiguous {cycle}".encode()))
                     wait_for(radio.held.is_set)
-                    ipc_send(client, 21, struct.pack("<i768s", 0, f"queued {cycle}".encode()))
+                    ipc_send(client, 21, struct.pack("<65s768s", b"channel:" + b"0" * 32, f"queued {cycle}".encode()))
                     wait_for(lambda: bool(sql(f"SELECT 1 FROM messages WHERE text='queued {cycle}' AND status=0")))
                     # Leave an incomplete radio frame buffered before losing this tty.
                     os.write(master, wire_frame(b"\x05" + b"x" * 100)[:11])
